@@ -50,6 +50,11 @@ GROQ_READING_CONTRACT = {
     "selection": {**READING_CONTRACT["selection"], **GROQ_READING_PROFILE["selection"]},
 }
 PRICING_CONTRACT = load_pricing_contract(BASE_DIR / "pricing_contract.json")
+GROQ_PRICING_PROFILE = load_pricing_contract(BASE_DIR / "groq_pricing_contract.json")
+GROQ_PRICING_CONTRACT = {
+    **{key: value for key, value in PRICING_CONTRACT.items() if key not in ("cost_evidence", "response_format")},
+    **GROQ_PRICING_PROFILE,
+}
 REALTIME_CONTRACT = load_contract(BASE_DIR / "realtime_contract.json")
 OPENAI_CALLS_URL = "https://api.openai.com/v1/realtime/calls"
 MAX_SDP_BYTES = 65536
@@ -316,16 +321,26 @@ def create_app(runs_root: Path | None = None, *, allowed_origin: str | None = No
             )
             raise StoreError(503, reason)
 
-        async def blocked_groq_price_books(target_store, sweep_id, *, book_ids=None, **kwargs):
+        async def selected_groq_price_books(
+            target_store, sweep_id, *, client=None, api_key=None, contract=None,
+            book_ids=None, manager=None, resolver=None, **kwargs
+        ):
+            if api_key:
+                return await price_books(
+                    target_store,
+                    sweep_id,
+                    client=client,
+                    api_key=api_key,
+                    contract=contract or GROQ_PRICING_CONTRACT,
+                    book_ids=book_ids,
+                    manager=manager or app.state.pricing,
+                    resolver=resolver,
+                )
             state = target_store.get(sweep_id)
             known = {book.id for book in state.books}
             if book_ids is not None and set(book_ids) - known:
                 raise StoreError(404, "unknown pricing target")
-            reason = (
-                "GROQ_API_KEY not configured"
-                if not os.environ.get("GROQ_API_KEY")
-                else "Groq listing discovery adapter unavailable"
-            )
+            reason = "GROQ_API_KEY not configured"
             target_store.record_price_stage(
                 sweep_id,
                 PricingStageRecord(
@@ -339,7 +354,7 @@ def create_app(runs_root: Path | None = None, *, allowed_origin: str | None = No
             raise StoreError(503, reason)
 
         app.state.groq_reader = selected_groq_read_spines
-        app.state.groq_pricer = blocked_groq_price_books
+        app.state.groq_pricer = selected_groq_price_books
         manager = VisionManager(
             analyze=default_analyze,
             contract=vision_contract,
@@ -352,14 +367,16 @@ def create_app(runs_root: Path | None = None, *, allowed_origin: str | None = No
         app.state.reading = ReadingManager(
             GROQ_READING_CONTRACT if inventory_provider == "groq" else READING_CONTRACT
         )
-        app.state.pricing = PricingManager(PRICING_CONTRACT)
+        app.state.pricing = PricingManager(
+            GROQ_PRICING_CONTRACT if inventory_provider == "groq" else PRICING_CONTRACT
+        )
         app.state.postwork = PostSweepProcessor(
             store=store,
             vision=manager,
             reading=app.state.reading,
             pricing=app.state.pricing,
             reader=(lambda: selected_groq_read_spines) if inventory_provider == "groq" else _dep_value(app, get_reader),
-            pricer=blocked_groq_price_books if inventory_provider == "groq" else price_books,
+            pricer=selected_groq_price_books if inventory_provider == "groq" else price_books,
             resolver=_dep_value(app, get_pricing_resolver),
             api_key=lambda: os.environ.get("GROQ_API_KEY" if inventory_provider == "groq" else "OPENAI_API_KEY"),
             client_factory=_managed_dep(app, get_http_client),
@@ -557,7 +574,14 @@ def create_app(runs_root: Path | None = None, *, allowed_origin: str | None = No
         require_idle_postwork(sweep_id)
         body = await parse_json_body(request, PriceBooksRequest)
         if app.state.inventory_provider == "groq":
-            return await app.state.groq_pricer(app.state.store, sweep_id, book_ids=body.book_ids)
+            return await app.state.groq_pricer(
+                app.state.store,
+                sweep_id,
+                client=client,
+                api_key=os.environ.get("GROQ_API_KEY"),
+                book_ids=body.book_ids,
+                resolver=resolver,
+            )
         return await price_books(
             app.state.store,
             sweep_id,
