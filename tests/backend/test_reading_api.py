@@ -679,3 +679,29 @@ def test_read_spines_item_only_sweep_still_rejected(client, monkeypatch):
     resp = post(client, f"/api/sweeps/{sid}/read_spines", json={})
     assert resp.status_code == 409
     assert requests == []
+
+
+def test_groq_reading_missing_key_never_calls_openai(tmp_path, monkeypatch):
+    monkeypatch.setenv("INVENTORY_PROVIDER", "groq")
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", TEST_KEY)
+    monkeypatch.delenv("VISION_ENABLED", raising=False)
+    app = server.create_app(tmp_path / "runs", allowed_origin=ORIGIN)
+    with TestClient(app) as groq_client:
+        sweep_id = start_sweep(groq_client).json()["id"]
+        _, book_ids = seed_book(groq_client, sweep_id)
+        requests = stub_provider(
+            app,
+            lambda req: httpx.Response(200, json=provider_response([reading_for(book_ids[0])])),
+        )
+        reply = post(groq_client, f"/api/sweeps/{sweep_id}/read_spines", json={})
+        assert reply.status_code == 503
+        assert requests == []
+        stages = app.state.store.get(sweep_id).reading_stages
+        assert any(
+            stage.ref_ids == book_ids
+            and stage.status == "skipped"
+            and stage.provider == "groq"
+            and "GROQ_API_KEY" in (stage.error or "")
+            for stage in stages
+        )

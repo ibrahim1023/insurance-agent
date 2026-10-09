@@ -668,3 +668,50 @@ def test_set_postwork_deadline_rejects_nonfinite_input():
         with pytest.raises(ValueError):
             manager.set_postwork_deadline("sweep", bad)
     assert manager.remaining_budget("sweep")["seconds_left"] >= 0.0
+
+
+def test_groq_mode_missing_key_never_calls_openai(tmp_path, monkeypatch):
+    monkeypatch.setenv("INVENTORY_PROVIDER", "groq")
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", TEST_KEY)
+    monkeypatch.delenv("VISION_ENABLED", raising=False)
+    app = server.create_app(tmp_path / "runs", allowed_origin=ORIGIN)
+    with TestClient(app) as groq_client:
+        requests = stub_provider(
+            app, lambda request: httpx.Response(200, json=provider_response())
+        )
+        sweep_id = start_sweep(groq_client).json()["id"]
+        frame_id = upload_and_id(groq_client, sweep_id)
+        reply = analyze(groq_client, sweep_id, {"frame_id": frame_id})
+        assert reply.status_code == 503
+        assert requests == []
+        stages = app.state.store.get(sweep_id).vision_stages
+        assert any(
+            stage.frame_id == frame_id
+            and stage.status == "failed"
+            and stage.provider == "groq"
+            and stage.persisted_ref
+            for stage in stages
+        )
+
+
+def test_invalid_inventory_provider_rejected_at_startup(tmp_path, monkeypatch):
+    monkeypatch.setenv("INVENTORY_PROVIDER", "unknown-provider")
+    with pytest.raises(ValueError, match="unsupported inventory provider"):
+        with TestClient(server.create_app(tmp_path / "runs", allowed_origin=ORIGIN)):
+            pass
+
+
+def test_default_provider_remains_openai(tmp_path, monkeypatch):
+    monkeypatch.delenv("INVENTORY_PROVIDER", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", TEST_KEY)
+    monkeypatch.delenv("VISION_ENABLED", raising=False)
+    app = server.create_app(tmp_path / "runs", allowed_origin=ORIGIN)
+    with TestClient(app) as openai_client:
+        requests = stub_provider(
+            app, lambda request: httpx.Response(200, json=provider_response())
+        )
+        sweep_id = start_sweep(openai_client).json()["id"]
+        frame_id = upload_and_id(openai_client, sweep_id)
+        assert analyze(openai_client, sweep_id, {"frame_id": frame_id}).status_code == 200
+        assert [request.url.host for request in requests] == ["api.openai.com"]

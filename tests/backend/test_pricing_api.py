@@ -421,3 +421,28 @@ def test_price_books_response_and_state_suppress_after_late_exclusion(
     loaded = client.get(f"/api/sweeps/{sid}").json()
     assert loaded["books"][0]["replacement_cost"] is None
     assert body["reviews_added"] == len(loaded["review_queue"]) - before
+
+
+def test_groq_pricing_missing_key_never_calls_openai(tmp_path, monkeypatch):
+    monkeypatch.setenv("INVENTORY_PROVIDER", "groq")
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", TEST_KEY)
+    monkeypatch.delenv("VISION_ENABLED", raising=False)
+    app = server.create_app(tmp_path / "runs", allowed_origin=ORIGIN)
+    with TestClient(app) as groq_client:
+        sweep_id = start_sweep(groq_client).json()["id"]
+        book_id = seed_identified_book(groq_client, sweep_id)
+        requests = stub_pricing(
+            app, lambda request: httpx.Response(200, json=discovery_response(book_id))
+        )
+        reply = post(groq_client, f"/api/sweeps/{sweep_id}/price_books", json={})
+        assert reply.status_code == 503
+        assert requests == []
+        stages = app.state.store.get(sweep_id).price_stages
+        assert any(
+            stage.kind == "discovery"
+            and stage.status == "skipped"
+            and stage.provider == "groq"
+            and "GROQ_API_KEY" in (stage.error or "")
+            for stage in stages
+        )

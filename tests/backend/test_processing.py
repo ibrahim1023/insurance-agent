@@ -1271,3 +1271,36 @@ def test_concurrent_success_stage_survives_attempt_skip(client):
     entry = by_frame[frames[0].id]
     assert entry["processing_status"] == "completed"
     assert len(entry["stage_refs"]) == 2
+
+
+def test_groq_postwork_never_uses_openai_reader(tmp_path, monkeypatch):
+    monkeypatch.setenv("INVENTORY_PROVIDER", "groq")
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-only-openai")
+    monkeypatch.delenv("VISION_ENABLED", raising=False)
+    app = server.create_app(tmp_path / "runs", allowed_origin=ORIGIN)
+    requests = []
+
+    async def override_client():
+        def record(request):
+            requests.append(request.url.host)
+            return httpx.Response(500, json={"error": "offline fixture"})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(record)) as client:
+            yield client
+
+    app.dependency_overrides[server.get_http_client] = override_client
+    with TestClient(app) as groq_client:
+        sweep_id = api_sweep(groq_client)
+        store = app.state.store
+        frame = _frame(store, sweep_id)
+        _tracks(store, sweep_id, frame.id, books=1)
+        _completed_vision_stage(store, sweep_id, frame.id)
+        post(groq_client, f"/api/sweeps/{sweep_id}/end", json={"duration_s": 2.0})
+        settled = wait_postwork(groq_client, sweep_id)
+        assert settled["postwork_status"] in TERMINAL
+        assert requests == []
+        assert any(
+            stage.status == "skipped" and stage.provider == "groq"
+            for stage in store.get(sweep_id).reading_stages
+        )
