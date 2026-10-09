@@ -15,6 +15,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from .groq_image import observe_groq_jpeg
 from .models import CorrectionIntent, PricingStageRecord, ReadingStageRecord, VisionStageRecord
 from .price_sources import default_resolver
 from .pricing import PricingManager, load_pricing_contract, price_books
@@ -35,6 +36,11 @@ BASE_DIR = Path(__file__).resolve().parent
 WEB_DIR = BASE_DIR / "web"
 VOICE_PATH = PROJECT_ROOT / "preflight" / "safari" / "voice.js"
 VISION_CONTRACT = load_contract(BASE_DIR / "vision_contract.json")
+GROQ_VISION_PROFILE = load_contract(BASE_DIR / "groq_vision_contract.json")
+GROQ_VISION_CONTRACT = {
+    **{key: value for key, value in VISION_CONTRACT.items() if key != "cost_evidence"},
+    **GROQ_VISION_PROFILE,
+}
 TRACKING_CONTRACT = load_contract(BASE_DIR / "tracking_contract.json")
 READING_CONTRACT = load_reading_contract(BASE_DIR / "reading_contract.json")
 PRICING_CONTRACT = load_pricing_contract(BASE_DIR / "pricing_contract.json")
@@ -201,14 +207,12 @@ def create_app(runs_root: Path | None = None, *, allowed_origin: str | None = No
             "yes",
         )
 
+        vision_contract = GROQ_VISION_CONTRACT if inventory_provider == "groq" else VISION_CONTRACT
+
         async def default_analyze(sweep_id, frame_id, client):
-            if inventory_provider == "groq":
+            if inventory_provider == "groq" and not os.environ.get("GROQ_API_KEY"):
                 store.frame_path(sweep_id, frame_id)
-                reason = (
-                    "GROQ_API_KEY not configured"
-                    if not os.environ.get("GROQ_API_KEY")
-                    else "Groq scene adapter unavailable"
-                )
+                reason = "GROQ_API_KEY not configured"
                 ref = store.persist_stage(
                     sweep_id,
                     f"vision_{frame_id}_{uuid.uuid4().hex}.json",
@@ -236,10 +240,11 @@ def create_app(runs_root: Path | None = None, *, allowed_origin: str | None = No
                 sweep_id,
                 frame_id,
                 client=client,
-                api_key=os.environ.get("OPENAI_API_KEY"),
-                contract=VISION_CONTRACT,
+                api_key=os.environ.get("GROQ_API_KEY" if inventory_provider == "groq" else "OPENAI_API_KEY"),
+                contract=vision_contract,
                 sha_cache=manager.sha_cache(sweep_id),
                 tracking_contract=TRACKING_CONTRACT,
+                **({"observer": observe_groq_jpeg} if inventory_provider == "groq" else {}),
             )
 
         def sha_for(sweep_id, frame_id):
@@ -321,7 +326,7 @@ def create_app(runs_root: Path | None = None, *, allowed_origin: str | None = No
         app.state.groq_pricer = blocked_groq_price_books
         manager = VisionManager(
             analyze=default_analyze,
-            contract=VISION_CONTRACT,
+            contract=vision_contract,
             enabled=vision_enabled,
             record_skip=record_skip,
             client_factory=lambda: httpx.AsyncClient(timeout=REQUEST_TIMEOUT),

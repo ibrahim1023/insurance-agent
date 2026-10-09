@@ -1,5 +1,7 @@
 import asyncio
+import base64
 import contextlib
+import hashlib
 import json
 import time
 from pathlib import Path
@@ -715,3 +717,163 @@ def test_default_provider_remains_openai(tmp_path, monkeypatch):
         frame_id = upload_and_id(openai_client, sweep_id)
         assert analyze(openai_client, sweep_id, {"frame_id": frame_id}).status_code == 200
         assert [request.url.host for request in requests] == ["api.openai.com"]
+
+
+def test_groq_scene_stage_and_cache_provenance(tmp_path, monkeypatch):
+    monkeypatch.setenv("INVENTORY_PROVIDER", "groq")
+    monkeypatch.setenv("GROQ_API_KEY", "groq-test-only-token")
+    monkeypatch.setenv("OPENAI_API_KEY", TEST_KEY)
+    monkeypatch.delenv("VISION_ENABLED", raising=False)
+    app = server.create_app(tmp_path / "runs", allowed_origin=ORIGIN)
+    with TestClient(app) as groq_client:
+        requests = stub_provider(
+            app,
+            lambda request: httpx.Response(
+                200,
+                json={
+                    "id": "groq_response_1",
+                    "model": "qwen/qwen3.8-27b",
+                    "choices": [{
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": json.dumps(scene())},
+                    }],
+                    "usage": {"prompt_tokens": 2100, "completion_tokens": 100, "total_tokens": 2200},
+                },
+            ),
+        )
+        sweep_id = start_sweep(groq_client).json()["id"]
+        first = upload_and_id(groq_client, sweep_id)
+        sha = hashlib.sha256(tiny_jpeg()).hexdigest()
+        app.state.vision.sha_cache(sweep_id)[f"{CONTRACT['version']}:{sha}"] = {"wrong_provider": True}
+        reply = analyze(groq_client, sweep_id, {"frame_id": first})
+        assert reply.status_code == 200, reply.text
+        assert [request.url.host for request in requests] == ["api.groq.com"]
+        payload = json.loads(requests[0].content)
+        assert payload["model"] == "qwen/qwen3.8-27b"
+        assert payload["response_format"]["type"] == "json_schema"
+        assert payload["response_format"]["json_schema"]["strict"] is True
+        images = [part for part in payload["messages"][1]["content"] if part["type"] == "image_url"]
+        assert len(images) == 1
+        assert images[0]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+        state = app.state.store.get(sweep_id)
+        stage = state.vision_stages[-1]
+        assert stage.status == "completed"
+        assert stage.provider == "groq"
+        assert stage.model == "qwen/qwen3.8-27b"
+        raw_stage = json.loads(app.state.store.stage_path(sweep_id, stage.persisted_ref).read_text())
+        assert raw_stage["response_id"] == "groq_response_1"
+        assert raw_stage["usage"]["prompt_tokens"] == 2100
+        assert raw_stage["image_width"] == 16
+        assert raw_stage["sent_image_width"] == 16
+        second = upload_and_id(groq_client, sweep_id, ts="2.0")
+        cached = analyze(groq_client, sweep_id, {"frame_id": second})
+        assert cached.status_code == 200
+        assert cached.json()["cached"] is True
+        assert len(requests) == 1
+        assert app.state.store.get(sweep_id).vision_stages[-1].provider == "groq"
+
+
+@pytest.mark.parametrize("variant,expected_status", [
+    ("rate_limit", 429),
+    ("refusal", 502),
+    ("malformed", 502),
+    ("wrong_model", 502),
+    ("incomplete", 502),
+])
+def test_groq_scene_rejects_unusable_provider_output(tmp_path, monkeypatch, variant, expected_status):
+    monkeypatch.setenv("INVENTORY_PROVIDER", "groq")
+    monkeypatch.setenv("GROQ_API_KEY", "groq-test-only-token")
+    monkeypatch.setenv("OPENAI_API_KEY", TEST_KEY)
+    monkeypatch.delenv("VISION_ENABLED", raising=False)
+    raw = {
+        "id": "groq_response_bad",
+        "model": "qwen/qwen3.8-27b",
+        "choices": [{
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {"role": "assistant", "content": json.dumps(scene())},
+        }],
+    }
+    if variant == "refusal":
+        raw["choices"][0]["message"] = {"role": "assistant", "refusal": "fixture refusal"}
+    elif variant == "malformed":
+        raw["choices"][0]["message"]["content"] = "not-json"
+    elif variant == "wrong_model":
+        raw["model"] = "unexpected-model"
+    elif variant == "incomplete":
+        raw["choices"][0]["finish_reason"] = "length"
+    app = server.create_app(tmp_path / "runs", allowed_origin=ORIGIN)
+    with TestClient(app) as groq_client:
+        requests = stub_provider(
+            app,
+            lambda request: httpx.Response(429 if variant == "rate_limit" else 200, json=raw),
+        )
+        sweep_id = start_sweep(groq_client).json()["id"]
+        frame_id = upload_and_id(groq_client, sweep_id)
+        reply = analyze(groq_client, sweep_id, {"frame_id": frame_id})
+        assert reply.status_code == expected_status
+        assert [request.url.host for request in requests] == ["api.groq.com"]
+        state = app.state.store.get(sweep_id)
+        assert all(stage.status != "completed" for stage in state.vision_stages)
+        assert any(stage.status == "failed" and stage.provider == "groq" for stage in state.vision_stages)
+
+
+def test_groq_scene_downscales_only_the_sent_image(tmp_path, monkeypatch):
+    monkeypatch.setenv("INVENTORY_PROVIDER", "groq")
+    monkeypatch.setenv("GROQ_API_KEY", "groq-test-only-token")
+    monkeypatch.delenv("VISION_ENABLED", raising=False)
+    original = tiny_jpeg(width=1800, height=900)
+    app = server.create_app(tmp_path / "runs", allowed_origin=ORIGIN)
+    with TestClient(app) as groq_client:
+        requests = stub_provider(
+            app,
+            lambda request: httpx.Response(200, json={
+                "id": "groq_large_image",
+                "model": "qwen/qwen3.8-27b",
+                "choices": [{
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "message": {"role": "assistant", "content": json.dumps(scene())},
+                }],
+            }),
+        )
+        sweep_id = start_sweep(groq_client).json()["id"]
+        frame_id = upload_and_id(groq_client, sweep_id, body=original)
+        reply = analyze(groq_client, sweep_id, {"frame_id": frame_id})
+        assert reply.status_code == 200, reply.text
+        assert (reply.json()["image_width"], reply.json()["sent_image_width"]) == (1800, 1600)
+        assert (reply.json()["image_height"], reply.json()["sent_image_height"]) == (900, 800)
+        payload = json.loads(requests[0].content)
+        limits = payload["response_format"]["json_schema"]["schema"]["$defs"]["box"]["properties"]
+        assert (limits["right"]["maximum"], limits["bottom"]["maximum"]) == (1600, 800)
+        image_part = next(part for part in payload["messages"][1]["content"] if part["type"] == "image_url")
+        sent = base64.b64decode(image_part["image_url"]["url"].split(",", 1)[1])
+        decoded = cv2.imdecode(np.frombuffer(sent, dtype=np.uint8), cv2.IMREAD_COLOR)
+        assert decoded.shape[:2] == (800, 1600)
+        assert app.state.store.frame_path(sweep_id, frame_id).read_bytes() == original
+
+
+def test_groq_scene_rate_limit_records_retry_metadata(tmp_path, monkeypatch):
+    monkeypatch.setenv("INVENTORY_PROVIDER", "groq")
+    monkeypatch.setenv("GROQ_API_KEY", "groq-test-only-token")
+    monkeypatch.delenv("VISION_ENABLED", raising=False)
+    app = server.create_app(tmp_path / "runs", allowed_origin=ORIGIN)
+    with TestClient(app) as groq_client:
+        requests = stub_provider(
+            app,
+            lambda request: httpx.Response(
+                429,
+                headers={"retry-after": "15", "x-ratelimit-remaining-tokens": "0"},
+                json={"error": "quota reached"},
+            ),
+        )
+        sweep_id = start_sweep(groq_client).json()["id"]
+        frame_id = upload_and_id(groq_client, sweep_id)
+        reply = analyze(groq_client, sweep_id, {"frame_id": frame_id})
+        assert reply.status_code == 429
+        assert len(requests) == 1
+        stage = app.state.store.get(sweep_id).vision_stages[-1]
+        assert stage.status == "failed" and stage.provider == "groq"
+        assert "retry-after=15" in stage.error
+        assert "remaining-tokens=0" in stage.error
