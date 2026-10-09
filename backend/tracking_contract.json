@@ -1,0 +1,89 @@
+{
+  "version": "evidence-tracks-v1",
+  "authored_by": "lead",
+  "scope": "tracking proposals; thresholds are initial declared choices, not calibrated accuracy claims",
+  "atlas_registration": {
+    "feature_method": "OpenCV SIFT full-frame; use frame_alignment matching/RANSAC thresholds, not per-spine identity matching",
+    "minimum_overlap_fraction_of_smaller_frame": 0.25,
+    "minimum_competing_inlier_fraction": 0.20,
+    "maximum_competing_displacement_fraction_of_frame_width": 0.025,
+    "minimum_projected_area_ratio": 0.5,
+    "maximum_projected_area_ratio": 2.0,
+    "maximum_canvas_area_ratio_of_sources": 2.0
+  },
+  "frame_alignment": {
+    "feature_method": "OpenCV ORB",
+    "nfeatures": 1500,
+    "matching": "BFMatcher Hamming knn k=2",
+    "ratio_test": 0.75,
+    "minimum_good_matches": 12,
+    "homography": "findHomography RANSAC previous_image_points to current_image_points",
+    "reprojection_error_px": "max(1.5, 0.003125*max(current_width,current_height))",
+    "minimum_inliers": 8,
+    "minimum_inlier_ratio": 0.50,
+    "reject_nonfinite_or_singular_transform": true,
+    "identical_image_sha_action": "reuse observed track ids, do not create duplicates or claim a sensor failure",
+    "alignment_failure_action": "retain new observations as unresolved associations with potential-duplicate review; no title-only merge"
+  },
+  "association": {
+    "project_previous_box": "transform all four box corners with accepted homography; enclosing axis-aligned pixel box",
+    "minimum_projected_iou": 0.50,
+    "appearance": "L1-normalized HSV histogram on the observed spine crop with H8*S8*V8 bins, ranges H0..180/S0..256/V0..256; cv2.HISTCMP_BHATTACHARYYA",
+    "maximum_histogram_distance": 0.35,
+    "sift_ratio_test": 0.75,
+    "minimum_sift_matches_when_color_changes": 8,
+    "maximum_prior_book_frames": 2,
+    "conflicting_legible_title_action": "reject association, preserve both observations and review",
+    "assignment": "sort admissible pairs by descending IoU then ascending histogram distance then existing id/current index; assign one-to-one, never assign one old track to two current proposals",
+    "ambiguous_pair_iou_margin": 0.10,
+    "ambiguous_action": "do not force association; retain uncertain proposal/track with explicit potential-duplicate review",
+    "dedup_by_title_only": false,
+    "identical_title_copies_in_same_frame": "always separate physical proposals/tracks",
+    "no_appearance_or_alignment_evidence": "association unresolved, not invented continuity"
+  },
+  "scene_reconciliation": {
+    "minimum_views_per_scene": 2,
+    "minimum_matching_spines": 2,
+    "minimum_matching_fraction": 0.5,
+    "recent_anchors_per_scene": 2
+  },
+  "records": {
+    "minimum_vertical_frame_fraction_for_border_candidate": 0.5,
+    "book_id": "server-generated book_<UUIDhex>",
+    "item_id": "server-generated item_<UUIDhex>",
+    "status_unknown_book": "unidentified",
+    "identified_requires": "legible nonempty title and text_confidence>=0.90 plus legible supporting author or independently sourced catalogue corroboration; otherwise output title/author empty and preserve observed fragments separately",
+    "publisher_edition_isbn": "only supported visible characters/corroborated work metadata with provenance; catalogue listing ISBN is not owned ISBN",
+    "special_flags": "any possible_signed/possible_rare/possible_antiquarian routes needs_appraisal and suppresses automatic valuation",
+    "nonbook_confidence_min": 0.85,
+    "art_categories": ["art", "portrait", "framed_print"],
+    "art_default": "needs_appraisal until clear user-established print assertion",
+    "spine_dimensions_default": null,
+    "price_default": null,
+    "count_reporting": "recorded/provisional tracks plus unresolved association coverage, never candidate count silently claimed as final physical count"
+  },
+  "shelves": {
+    "region_source": "visually observed shelving item; known server id and bbox evidence",
+    "book_membership": "book center inside supported shelving bbox; smallest containing shelving region if multiple; otherwise unassigned with reason",
+    "unknown_shelf_action": "do not invent a shelf name to satisfy a correction",
+    "exclude_region": "applies to current and subsequently associated observations, retained as ownership exclusion with user source"
+  },
+  "state_commit": {
+    "under_store_lock": true,
+    "preserve_latest_assertions_and_exclusions": true,
+    "never_replace_current_state_with_preawait_snapshot": true,
+    "new_observations_link_actual_frame": true,
+    "best_evidence": "retain first useful evidence and any later sharper crop using actual Laplacian variance; don't remove prior references",
+    "inventory_complete": "false while unresolved coverage/association remains; final completion requires actual evaluation/reconciliation"
+  },
+  "required_literal_tests": [
+    "Same frame repeated produces the same ids and no duplicate count",
+    "Two physically separate copies with identical title in one frame remain two tracks",
+    "Known image translation and projected boxes preserve original ids",
+    "Conflicting legible titles cannot merge merely because boxes overlap",
+    "No usable alignment/appearance evidence creates explicit unresolved associations, not a confident title-only merge",
+    "User ownership/shelf exclusions and edition/art assertions survive a delayed analysis commit",
+    "No dimensions, ISBN, price or total are filled from a model's unsupported proposal",
+    "A second independently labelled shelf/continuous sweep is required before generalization or official accuracy claims"
+  ]
+}

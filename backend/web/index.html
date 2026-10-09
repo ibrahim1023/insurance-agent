@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Library contents claim — capture</title>
+<style>
+body { font-family: -apple-system, sans-serif; margin: 12px; background: #111; color: #eee; }
+video { width: 100%; max-height: 40vh; background: #000; }
+audio { width: 100%; }
+button { font-size: 1rem; padding: 10px 14px; margin: 4px; }
+input, select { font-size: 1rem; padding: 6px; margin: 4px; }
+label { font-size: 0.9rem; }
+#status { padding: 8px; margin: 8px 0; border-radius: 6px; background: #222; }
+#status.partial { background: #7a5a00; }
+#status.error { background: #7a1f1f; }
+#warnings { color: #ffb84d; font-size: 0.85rem; }
+#warnings div { margin: 2px 0; }
+#inventory { padding: 8px; margin: 8px 0; border: 1px dashed #555; border-radius: 6px; font-size: 0.9rem; }
+#log { font-size: 0.7rem; max-height: 24vh; overflow: auto; white-space: pre-wrap; background: #000; padding: 8px; }
+.privacy { font-size: 0.8rem; color: #bbb; }
+#proposals { font-size: 0.85rem; margin: 8px 0; }
+#proposals div { margin: 2px 0; }
+#proposals img { max-width: 100%; display: block; }
+#proposals canvas { pointer-events: none; }
+</style>
+</head>
+<body>
+<h2>Library contents claim — capture</h2>
+<p class="privacy">Camera frames and notes are saved on your local server. Starting a sweep sends microphone audio and selected saved camera snapshots to OpenAI for voice. Stop sweep starts bounded inventory, reading and eligible pricing work; these provider calls are billed. End call stops audio but does not cancel normal saved-sweep processing. Do not capture people or personal documents, and get permission for spaces you do not own.</p>
+<div id="status">idle &mdash; server key configured: <span id="keyState">?</span></div>
+<div>stage: <span id="stage">not started</span> &middot; sweep: <span id="sweepId">none</span> &middot; saved frames: <span id="frameCount">0</span></div>
+<video id="preview" autoplay muted playsinline></video>
+<audio id="remoteAudio" controls></audio>
+<canvas id="grab" hidden></canvas>
+<div>
+<label>Country <input id="country" value="AE" maxlength="2" size="3"></label>
+<label>Currency <input id="currency" value="AED" maxlength="3" size="4"></label>
+</div>
+<div>
+<button id="startBtn">Start sweep</button>
+<button id="audioBtn" disabled>Enable audio</button>
+<button id="stopBtn" disabled>Stop sweep</button>
+<button id="endCallBtn" disabled>End call</button>
+</div>
+<div>
+<input id="turnInput" size="48" placeholder="Type a correction or note for this sweep" disabled>
+<button id="turnBtn" disabled>Send turn</button>
+<button id="analyzeBtn" disabled>Analyze latest saved frame</button>
+<button id="readBtn" disabled>Read spine crops</button>
+<button id="priceBtn" disabled>Retrieve book prices</button>
+<button id="packetBtn" disabled>Generate claim packet</button>
+</div>
+<div id="proposals"></div>
+<div id="inventory">Provisional inventory — no recorded tracks yet. Prices, when present, are cited listing evidence — not a valuation.</div>
+<div id="packet"></div>
+<div id="warnings"></div>
+<pre id="log"></pre>
+<script type="module" src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,347 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Safari camera + voice preflight probe</title>
+<style>
+body { font-family: -apple-system, sans-serif; margin: 12px; background: #111; color: #eee; }
+video { width: 100%; max-height: 40vh; background: #000; }
+audio { width: 100%; }
+button { font-size: 1rem; padding: 10px 14px; margin: 4px; }
+#status { padding: 8px; margin: 8px 0; border-radius: 6px; background: #222; }
+#status.partial { background: #7a5a00; }
+#status.error { background: #7a1f1f; }
+#log { font-size: 0.7rem; max-height: 30vh; overflow: auto; white-space: pre-wrap; background: #000; padding: 8px; }
+</style>
+</head>
+<body>
+<h2>Safari camera + voice preflight probe</h2>
+<div id="status">idle &mdash; server key configured: <span id="keyState">?</span></div>
+<video id="preview" autoplay muted playsinline></video>
+<audio id="remoteAudio" controls></audio>
+<canvas id="grab" hidden></canvas>
+<div>
+<label><input id="voiceMode" type="checkbox"> Enable billed voice concurrency (only after approval)</label><br>
+<button id="startBtn">Start camera + microphone</button>
+<button id="audioBtn" disabled>Enable audio</button>
+<button id="speakBtn" disabled>Ask agent to speak several seconds</button>
+<button id="issueBtn" disabled>Mark preview issue</button>
+<button id="interruptBtn" disabled>Mark interruption observed</button>
+<button id="stopBtn" disabled>Stop</button>
+<button id="downloadBtn">Download raw log</button>
+</div>
+<pre id="log"></pre>
+<script type="module">
+import { waitForConnection } from "/voice.js";
+
+const statusEl = document.getElementById("status");
+const keyStateEl = document.getElementById("keyState");
+const preview = document.getElementById("preview");
+const remoteAudio = document.getElementById("remoteAudio");
+const canvas = document.getElementById("grab");
+const logEl = document.getElementById("log");
+const startBtn = document.getElementById("startBtn");
+const voiceMode = document.getElementById("voiceMode");
+const audioBtn = document.getElementById("audioBtn");
+const speakBtn = document.getElementById("speakBtn");
+const issueBtn = document.getElementById("issueBtn");
+const interruptBtn = document.getElementById("interruptBtn");
+const stopBtn = document.getElementById("stopBtn");
+const downloadBtn = document.getElementById("downloadBtn");
+
+const events = [];
+const runId = "run-" + new Date().toISOString().replace(/[:.]/g, "-");
+let t0 = null;
+let startedAt = null;
+let frameIndex = 0;
+let run = null;
+let startedOnce = false;
+
+function elapsed() {
+  return t0 === null ? 0 : Math.round(performance.now() - t0);
+}
+
+function rec(name, facts) {
+  events.push(Object.assign({ t_ms: elapsed(), event: name }, facts || {}));
+  logEl.textContent = events.map((e) => JSON.stringify(e)).join("\n");
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function setStatus(text, cls) {
+  statusEl.textContent = text;
+  statusEl.className = cls || "";
+}
+
+function errMsg(e) {
+  return (e && e.name ? e.name + ": " : "") + (e && e.message ? e.message : String(e));
+}
+
+fetch("/preflight/health").then((r) => r.json()).then((h) => {
+  keyStateEl.textContent = String(h.openai_key_present === true);
+}).catch(() => {
+  keyStateEl.textContent = "unknown";
+});
+
+function waitIceGathering(peer, timeoutMs) {
+  return new Promise((resolve) => {
+    if (peer.iceGatheringState === "complete") return resolve();
+    const onChange = () => {
+      if (peer.iceGatheringState === "complete") {
+        peer.removeEventListener("icegatheringstatechange", onChange);
+        clearTimeout(timer);
+        resolve();
+      }
+    };
+    const timer = setTimeout(() => {
+      peer.removeEventListener("icegatheringstatechange", onChange);
+      resolve();
+    }, timeoutMs);
+    peer.addEventListener("icegatheringstatechange", onChange);
+  });
+}
+
+async function setupVoice(localRun, micTrack, mediaStream) {
+  const peer = new RTCPeerConnection();
+  localRun.peer = peer;
+  peer.addTrack(micTrack, mediaStream);
+  const channel = peer.createDataChannel("oai-events");
+  localRun.channel = channel;
+  channel.onopen = () => rec("voice_event", { type: "datachannel_open" });
+  channel.onmessage = (msg) => {
+    try {
+      const ev = JSON.parse(msg.data);
+      if (ev && typeof ev.type === "string") {
+        rec("voice_event", { type: ev.type });
+      }
+    } catch (e) {}
+  };
+  peer.ontrack = (e) => {
+    remoteAudio.srcObject = e.streams[0];
+    audioBtn.disabled = false;
+    remoteAudio.play().catch((err) => {
+      rec("audio_playback_issue", { error: errMsg(err) });
+    });
+  };
+  peer.onconnectionstatechange = () => {
+    rec("voice_event", { type: "peer_state", state: peer.connectionState });
+  };
+  const offer = await peer.createOffer();
+  await peer.setLocalDescription(offer);
+  await waitIceGathering(peer, 4000);
+  const resp = await fetch("/preflight/session", {
+    method: "POST",
+    headers: { "content-type": "application/sdp" },
+    body: peer.localDescription.sdp,
+    signal: localRun.abort.signal
+  });
+  if (!resp.ok) {
+    throw new Error("session setup failed: http " + resp.status);
+  }
+  const answer = await resp.text();
+  await peer.setRemoteDescription({ type: "answer", sdp: answer });
+  await waitForConnection(peer, { signal: localRun.abort.signal, timeoutMs: 15000 });
+}
+
+function waitForMetadata(video) {
+  if (video.readyState >= 1) return Promise.resolve();
+  return new Promise((resolve) => {
+    video.addEventListener("loadedmetadata", resolve, { once: true });
+  });
+}
+
+async function uploadFrame(localRun, idx) {
+  const ts = preview.currentTime;
+  const started = performance.now();
+  try {
+    canvas.width = preview.videoWidth;
+    canvas.height = preview.videoHeight;
+    canvas.getContext("2d").drawImage(preview, 0, 0);
+  } catch (e) {
+    rec("upload_failed", { frame_index: idx, error: "draw_failed: " + errMsg(e) });
+    return;
+  }
+  const blob = await new Promise((res) => canvas.toBlob(res, "image/jpeg", 0.85));
+  if (!blob) {
+    rec("upload_failed", { frame_index: idx, error: "encode_failed" });
+    return;
+  }
+  rec("upload_started", { frame_index: idx });
+  try {
+    const resp = await fetch(
+      "/preflight/frame?ts=" + encodeURIComponent(ts) + "&run_id=" + encodeURIComponent(runId),
+      { method: "POST", headers: { "content-type": "image/jpeg" }, body: blob, signal: localRun.abort.signal }
+    );
+    if (resp.ok) {
+      const data = await resp.json();
+      rec("upload_success", { frame_index: idx, frame_id: data.frame_id, http_status: resp.status, width_px: canvas.width, height_px: canvas.height, bytes: blob.size, latency_ms: Math.round(performance.now() - started) });
+    } else {
+      rec("upload_failed", { frame_index: idx, http_status: resp.status, latency_ms: Math.round(performance.now() - started) });
+    }
+  } catch (e) {
+    rec("upload_failed", { frame_index: idx, error: errMsg(e), latency_ms: Math.round(performance.now() - started) });
+  }
+}
+
+function samplingTick(localRun) {
+  const facts = { video_time_s: preview.currentTime, ready_state: preview.readyState };
+  if (preview.readyState < 2 || preview.videoWidth === 0 || preview.videoHeight === 0) {
+    facts.skip_reason = "preview_not_ready";
+    rec("sampling_tick", facts);
+    return;
+  }
+  if (localRun.lastPreviewTime !== null && preview.currentTime <= localRun.lastPreviewTime) {
+    facts.skip_reason = "preview_time_not_advancing";
+    rec("sampling_tick", facts);
+    rec("freshness_warning", { video_time_s: preview.currentTime });
+    return;
+  }
+  localRun.lastPreviewTime = preview.currentTime;
+  if (localRun.uploadInFlight) {
+    facts.skip_reason = "upload_in_flight";
+    rec("sampling_tick", facts);
+    return;
+  }
+  rec("sampling_tick", facts);
+  localRun.uploadInFlight = true;
+  const idx = frameIndex++;
+  uploadFrame(localRun, idx)
+    .catch((e) => rec("upload_failed", { frame_index: idx, error: errMsg(e) }))
+    .finally(() => { localRun.uploadInFlight = false; });
+}
+
+async function start() {
+  if (startedOnce) return;
+  startedOnce = true;
+  startBtn.disabled = true;
+  voiceMode.disabled = true;
+  t0 = performance.now();
+  startedAt = new Date().toISOString();
+  const localRun = {
+    abort: new AbortController(),
+    stream: null,
+    peer: null,
+    channel: null,
+    sampler: null,
+    uploadInFlight: false,
+    lastPreviewTime: null,
+    stopped: false
+  };
+  run = localRun;
+  setStatus("requesting camera + microphone...");
+  try {
+    localRun.stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: true
+    });
+  } catch (e) {
+    rec("setup_failed", { stage: "getUserMedia", error: errMsg(e) });
+    setStatus("device error: " + errMsg(e) + " — Reload page for a new run; download the current log first.", "error");
+    run = null;
+    return;
+  }
+  const stream = localRun.stream;
+  stopBtn.disabled = false;
+  preview.srcObject = stream;
+  const videoTrack = stream.getVideoTracks()[0];
+  const audioTrack = stream.getAudioTracks()[0];
+  if (videoTrack) {
+    videoTrack.addEventListener("ended", () => rec("camera_track_ended", {}));
+  }
+  rec("capture_started", {
+    video_track: videoTrack ? { ready_state: videoTrack.readyState, label: videoTrack.label, settings: videoTrack.getSettings() } : null,
+    audio_track: audioTrack ? { ready_state: audioTrack.readyState, label: audioTrack.label } : null
+  });
+  localRun.sampler = setInterval(() => samplingTick(localRun), 1000);
+  await waitForMetadata(preview);
+  try { await preview.play(); } catch (e) {}
+  if (localRun.stopped) return;
+  issueBtn.disabled = false;
+  interruptBtn.disabled = !voiceMode.checked;
+  if (!voiceMode.checked) {
+    rec("voice_skipped", { reason: "camera_mic_only_no_provider" });
+    setStatus("running: camera + microphone local; voice not connected");
+    return;
+  }
+  setStatus("camera running; setting up voice...");
+  try {
+    await setupVoice(localRun, audioTrack, stream);
+    if (localRun.stopped) return;
+    rec("voice_connected", {});
+    setStatus("running: camera + voice connected");
+    speakBtn.disabled = false;
+  } catch (e) {
+    if (localRun.stopped) return;
+    rec("setup_failed", { stage: "voice", error: errMsg(e) });
+    if (localRun.peer) { try { localRun.peer.close(); } catch (e2) {} localRun.peer = null; }
+    setStatus("PARTIAL MODE: camera only — " + errMsg(e), "partial");
+  }
+}
+
+function stop() {
+  const localRun = run;
+  if (!localRun) return;
+  localRun.stopped = true;
+  run = null;
+  localRun.abort.abort();
+  if (localRun.sampler) { clearInterval(localRun.sampler); localRun.sampler = null; }
+  if (localRun.channel) {
+    localRun.channel.onopen = null;
+    localRun.channel.onmessage = null;
+    try { localRun.channel.close(); } catch (e) {}
+    localRun.channel = null;
+  }
+  if (localRun.peer) {
+    localRun.peer.ontrack = null;
+    localRun.peer.onconnectionstatechange = null;
+    try { localRun.peer.close(); } catch (e) {}
+    localRun.peer = null;
+  }
+  if (localRun.stream) {
+    localRun.stream.getTracks().forEach((t) => t.stop());
+    localRun.stream = null;
+  }
+  preview.srcObject = null;
+  remoteAudio.srcObject = null;
+  rec("stopped", { video_time_s: preview.currentTime });
+  setStatus("stopped — log preserved below. Reload page for a new run; download the current log first.", "");
+  speakBtn.disabled = true;
+  audioBtn.disabled = true;
+  issueBtn.disabled = true;
+  interruptBtn.disabled = true;
+  stopBtn.disabled = true;
+}
+
+speakBtn.onclick = () => {
+  if (run && run.channel && run.channel.readyState === "open") {
+    run.channel.send(JSON.stringify({
+      type: "response.create",
+      response: { instructions: "Speak continuously for several seconds so the user can interrupt you." }
+    }));
+    rec("voice_event", { type: "response.create" });
+  }
+};
+audioBtn.onclick = () => {
+  remoteAudio.play().catch((e) => {
+    rec("audio_playback_issue", { error: errMsg(e) });
+  });
+};
+issueBtn.onclick = () => rec("preview_issue", { video_time_s: preview.currentTime, ready_state: preview.readyState });
+interruptBtn.onclick = () => rec("interruption_observed", { video_time_s: preview.currentTime });
+startBtn.onclick = start;
+stopBtn.onclick = stop;
+downloadBtn.onclick = () => {
+  const payload = {
+    device: { user_agent: navigator.userAgent, origin: location.origin },
+    started_at: startedAt,
+    events: events
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "preflight-safari-" + runId + ".json";
+  a.click();
+};
+</script>
+</body>
+</html>

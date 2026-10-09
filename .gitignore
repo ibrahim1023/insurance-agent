@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
+runs/
+.scratch/
+.devin/
+docs/agents
+.env*
+!.env.example
+*.pdf
+*.pem
+*.key
+*.p12
+*.pfx
