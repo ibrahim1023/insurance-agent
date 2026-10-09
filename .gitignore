@@ -5,6 +5,7 @@ __pycache__/
 .DS_Store
 runs/
 .scratch/
+.worktrees/
 .devin/
 docs/agents
 .env*
