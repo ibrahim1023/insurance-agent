@@ -1,5 +1,6 @@
 import base64
 import copy
+import json
 
 import cv2
 import httpx
@@ -7,6 +8,21 @@ import numpy as np
 from pydantic import ValidationError
 
 from preflight.vision import SceneProposal, VisionError
+
+from .sweeps import StoreError
+
+
+def _rate_limit_reason(prefix: str, headers: httpx.Headers) -> str:
+    reason = prefix
+    for header, label, limit in (
+        ("retry-after", "retry-after", 3600),
+        ("x-ratelimit-remaining-requests", "remaining-requests", 1_000_000),
+        ("x-ratelimit-remaining-tokens", "remaining-tokens", 1_000_000_000),
+    ):
+        value = headers.get(header, "")
+        if value.isascii() and value.isdecimal() and len(value) <= 10 and int(value) <= limit:
+            reason += f"; {label}={int(value)}"
+    return reason
 
 
 async def observe_groq_jpeg(client: httpx.AsyncClient, jpeg: bytes, api_key: str, contract: dict) -> dict:
@@ -74,16 +90,7 @@ async def observe_groq_jpeg(client: httpx.AsyncClient, jpeg: bytes, api_key: str
     except httpx.HTTPError:
         raise VisionError("vision provider unavailable") from None
     if response.status_code == 429:
-        reason = "vision provider rate limit reached"
-        for header, label, limit in (
-            ("retry-after", "retry-after", 3600),
-            ("x-ratelimit-remaining-requests", "remaining-requests", 1_000_000),
-            ("x-ratelimit-remaining-tokens", "remaining-tokens", 1_000_000_000),
-        ):
-            value = response.headers.get(header, "")
-            if value.isascii() and value.isdecimal() and len(value) <= 10 and int(value) <= limit:
-                reason += f"; {label}={int(value)}"
-        raise VisionError(reason)
+        raise VisionError(_rate_limit_reason("vision provider rate limit reached", response.headers))
     if response.status_code != 200:
         raise VisionError(f"vision provider rejected request ({response.status_code})")
     try:
@@ -121,4 +128,95 @@ async def observe_groq_jpeg(client: httpx.AsyncClient, jpeg: bytes, api_key: str
         "sent_image_height": sent_height,
         "coordinate_system": "pixels",
         "provider": "groq",
+    }
+
+
+async def read_groq_crops(
+    client: httpx.AsyncClient, crops: list[dict], api_key: str, contract: dict
+) -> dict:
+    if not api_key:
+        raise StoreError(503, "GROQ_API_KEY not configured")
+    if not crops or len(crops) > 3:
+        raise StoreError(422, "invalid Groq crop batch size")
+    refs = [entry["ref_id"] for entry in crops]
+    if len(set(refs)) != len(refs):
+        raise StoreError(422, "duplicate crop reference")
+    content = [{"type": "text", "text": "ref_ids: " + json.dumps(refs)}]
+    for entry in crops:
+        original = entry["views"].get("original")
+        if not isinstance(original, bytes) or not original.startswith(b"\xff\xd8\xff"):
+            raise StoreError(422, "invalid original crop evidence")
+        content.extend(
+            [
+                {"type": "text", "text": entry["ref_id"] + " original"},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "data:image/jpeg;base64," + base64.b64encode(original).decode("ascii")
+                    },
+                },
+            ]
+        )
+    settings = contract["request_configuration"]
+    payload = {
+        "model": contract["model"],
+        "messages": [
+            {"role": "system", "content": contract["instructions"]},
+            {"role": "user", "content": content},
+        ],
+        "reasoning_effort": settings["reasoning_effort"],
+        "max_completion_tokens": settings["max_completion_tokens"],
+        "stream": False,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": contract["response_format"],
+        },
+    }
+    try:
+        response = await client.post(
+            contract["endpoint"],
+            headers={"Authorization": "Bearer " + api_key},
+            json=payload,
+            timeout=settings["timeout_s"],
+        )
+    except httpx.HTTPError:
+        raise StoreError(502, "crop reading provider unavailable") from None
+    if response.status_code == 429:
+        raise StoreError(
+            429, _rate_limit_reason("crop reading provider rate limit reached", response.headers)
+        )
+    if response.status_code != 200:
+        raise StoreError(502, "crop reading provider rejected request")
+    try:
+        raw = response.json()
+    except ValueError:
+        raise StoreError(502, "crop reading provider response malformed") from None
+    if not isinstance(raw, dict) or raw.get("model") != contract["model"]:
+        raise StoreError(502, "crop reading provider response malformed")
+    choices = raw.get("choices")
+    if not isinstance(choices, list) or len(choices) != 1:
+        raise StoreError(502, "crop reading provider response malformed")
+    choice = choices[0]
+    if not isinstance(choice, dict) or choice.get("finish_reason") != "stop":
+        raise StoreError(502, "crop reading provider response not completed")
+    message = choice.get("message")
+    if not isinstance(message, dict) or message.get("refusal"):
+        raise StoreError(502, "crop reading provider refused")
+    text = message.get("content")
+    if not isinstance(text, str) or not isinstance(raw.get("id"), str):
+        raise StoreError(502, "crop reading provider response malformed")
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        raise StoreError(502, "crop reading provider response malformed") from None
+    if not isinstance(parsed, dict):
+        raise StoreError(502, "crop reading provider response malformed")
+    return {
+        "provider": "groq",
+        "parsed": parsed,
+        "raw_response": raw,
+        "usage": raw.get("usage") if isinstance(raw.get("usage"), dict) else None,
+        "model": raw["model"],
+        "response_id": raw["id"],
+        "cost_usd_estimate": None,
     }

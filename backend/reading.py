@@ -280,6 +280,7 @@ class ReadingManager:
                     ReadingStageRecord(
                         ref_ids=[b.id for b in batch],
                         status="running",
+                        provider=self.contract.get("provider", "openai"),
                     ),
                 )
                 reservations.append(index)
@@ -330,6 +331,7 @@ async def read_spines(
     contract: dict,
     ref_ids: list[str] | None = None,
     provider=None,
+    crop_provider=None,
     manager: ReadingManager | None = None,
     clock=time.monotonic,
 ) -> dict:
@@ -375,6 +377,7 @@ async def read_spines(
             raise StoreError(429, "crop reading batch budget exhausted")
         all_readings: list[dict] = []
         stage_refs: list[tuple[list[str], str]] = []
+        quota_limited = asyncio.Event()
 
         async def run_batch(batch, stage_index):
             ref_ids_batch = [b.id for b in batch]
@@ -412,8 +415,10 @@ async def read_spines(
                         "crop_refs": crop_refs,
                     }
                     store.register_crops(sweep_id, {book.id: crop_refs})
-                payload = build_reading_payload(contract, crops)
+                payload = crops if crop_provider is not None else build_reading_payload(contract, crops)
                 async with mgr._semaphore:
+                    if quota_limited.is_set():
+                        raise StoreError(429, "crop reading rate limit reached; later batches deferred")
                     remaining = max(
                         0.0,
                         min(
@@ -423,13 +428,24 @@ async def read_spines(
                     )
                     if remaining <= 0:
                         raise StoreError(429, "crop reading shared deadline exceeded")
-                    raw = await asyncio.wait_for(
-                        call_provider(payload, client, api_key, contract)
-                        if provider is None
-                        else call_provider(payload),
-                        timeout=min(timeout_s, remaining),
-                    )
-                parsed = parse_reading_response(raw) if provider is None else raw
+                    try:
+                        raw = await asyncio.wait_for(
+                            crop_provider(client, crops, api_key, contract)
+                            if crop_provider is not None
+                            else (
+                                call_provider(payload, client, api_key, contract)
+                                if provider is None else call_provider(payload)
+                            ),
+                            timeout=min(timeout_s, remaining),
+                        )
+                    except StoreError as exc:
+                        if crop_provider is not None and exc.status_code == 429 and "rate limit" in exc.detail:
+                            quota_limited.set()
+                        raise
+                parsed = (
+                    raw["parsed"] if crop_provider is not None
+                    else parse_reading_response(raw) if provider is None else raw
+                )
                 readings = validate_readings(parsed, ref_ids_batch)
             except StoreError as exc:
                 elapsed_ms = (clock() - started) * 1000.0
@@ -439,23 +455,26 @@ async def read_spines(
                 if isinstance(raw, dict):
                     stage_model = raw.get("model")
                     usage = raw.get("usage")
-                    estimate = usage_cost(raw, usage_cost_adapter(contract))
-                    if estimate is not None:
-                        cost = format(estimate, "f")
+                    if crop_provider is None:
+                        estimate = usage_cost(raw, usage_cost_adapter(contract))
+                        if estimate is not None:
+                            cost = format(estimate, "f")
                 ref = store.persist_stage(
                     sweep_id,
                     f"reading_{uuid.uuid4().hex}_{uuid.uuid4().hex}.json",
                     json.dumps(
                         {
                             "status": "failed",
+                            "provider": contract.get("provider", "openai"),
                             "ref_ids": ref_ids_batch,
                             "error": exc.detail,
                             "elapsed_ms": elapsed_ms,
-                            "raw_response": raw,
+                            "raw_response": raw.get("raw_response") if crop_provider and isinstance(raw, dict) else raw,
                             "usage": usage,
                             "model": stage_model,
+                            "response_id": raw.get("response_id") if crop_provider and isinstance(raw, dict) else None,
                             "cost_usd_estimate": cost,
-                            "cost_evidence": contract["cost_evidence"],
+                            "cost_evidence": contract.get("cost_evidence"),
                             "sources": sources,
                         },
                         default=str,
@@ -467,6 +486,7 @@ async def read_spines(
                     ReadingStageRecord(
                         ref_ids=ref_ids_batch,
                         status="failed",
+                        provider=contract.get("provider", "openai"),
                         persisted_ref=ref,
                         model=stage_model,
                         cost_usd_estimate=cost,
@@ -483,10 +503,11 @@ async def read_spines(
                     json.dumps(
                         {
                             "status": "failed",
+                            "provider": contract.get("provider", "openai"),
                             "ref_ids": ref_ids_batch,
                             "error": "crop reading provider unavailable",
                             "elapsed_ms": elapsed_ms,
-                            "raw_response": raw,
+                            "raw_response": raw.get("raw_response") if crop_provider and isinstance(raw, dict) else raw,
                             "sources": sources,
                         },
                         default=str,
@@ -498,6 +519,7 @@ async def read_spines(
                     ReadingStageRecord(
                         ref_ids=ref_ids_batch,
                         status="failed",
+                        provider=contract.get("provider", "openai"),
                         persisted_ref=ref,
                         model=None,
                         cost_usd_estimate=None,
@@ -508,23 +530,26 @@ async def read_spines(
                 raise StoreError(502, "crop reading provider unavailable") from exc
             elapsed_ms = (clock() - started) * 1000.0
             cost = None
-            if isinstance(raw, dict):
+            if isinstance(raw, dict) and crop_provider is None:
                 estimate = usage_cost(raw, usage_cost_adapter(contract))
                 if estimate is not None:
                     cost = format(estimate, "f")
+            stage_model = raw.get("model") if crop_provider is not None else contract["model"]
             ref = store.persist_stage(
                 sweep_id,
                 f"reading_{uuid.uuid4().hex}_{uuid.uuid4().hex}.json",
                 json.dumps(
                     {
                         "status": "completed",
+                        "provider": contract.get("provider", "openai"),
                         "ref_ids": ref_ids_batch,
                         "readings": readings,
-                        "raw_response": raw,
+                        "raw_response": raw.get("raw_response") if crop_provider is not None else raw,
                         "usage": raw.get("usage") if isinstance(raw, dict) else None,
-                        "model": contract["model"],
+                        "model": stage_model,
+                        "response_id": raw.get("response_id") if crop_provider is not None else raw.get("id"),
                         "cost_usd_estimate": cost,
-                        "cost_evidence": contract["cost_evidence"],
+                        "cost_evidence": contract.get("cost_evidence"),
                         "elapsed_ms": elapsed_ms,
                         "sources": sources,
                     },
@@ -537,8 +562,9 @@ async def read_spines(
                 ReadingStageRecord(
                     ref_ids=ref_ids_batch,
                     status="completed",
+                    provider=contract.get("provider", "openai"),
                     persisted_ref=ref,
-                    model=contract["model"],
+                    model=stage_model,
                     cost_usd_estimate=cost,
                     elapsed_ms=elapsed_ms,
                     error=None,

@@ -705,3 +705,124 @@ def test_groq_reading_missing_key_never_calls_openai(tmp_path, monkeypatch):
             and "GROQ_API_KEY" in (stage.error or "")
             for stage in stages
         )
+
+
+def test_groq_crop_batch_is_bounded_and_preserves_unknowns(tmp_path, monkeypatch):
+    monkeypatch.setenv("INVENTORY_PROVIDER", "groq")
+    monkeypatch.setenv("GROQ_API_KEY", "groq-test-only-token")
+    monkeypatch.setenv("OPENAI_API_KEY", TEST_KEY)
+    monkeypatch.delenv("VISION_ENABLED", raising=False)
+    app = server.create_app(tmp_path / "runs", allowed_origin=ORIGIN)
+    with TestClient(app) as groq_client:
+        sweep_id = start_sweep(groq_client).json()["id"]
+        frame_id, ids = seed_book(groq_client, sweep_id, count=4)
+
+        def handler(request):
+            payload = json.loads(request.content)
+            refs = json.loads(payload["messages"][1]["content"][0]["text"].removeprefix("ref_ids: "))
+            readings = [
+                reading_for(ref, title="", author_legible=False)
+                if ref == ids[0] else reading_for(ref)
+                for ref in refs
+            ]
+            return httpx.Response(200, json={
+                "id": "groq_reading_fixture",
+                "model": "qwen/qwen3.8-27b",
+                "choices": [{
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "message": {"role": "assistant", "content": json.dumps({"readings": readings})},
+                }],
+                "usage": {"prompt_tokens": 2048 * len(refs), "completion_tokens": 100},
+            })
+
+        requests = stub_provider(app, handler)
+        reply = post(groq_client, f"/api/sweeps/{sweep_id}/read_spines", json={})
+        assert reply.status_code == 200, reply.text
+        assert reply.json()["batches"] == 2
+        assert [request.url.host for request in requests] == ["api.groq.com"] * 2
+        image_counts = [
+            sum(part["type"] == "image_url" for part in json.loads(req.content)["messages"][1]["content"])
+            for req in requests
+        ]
+        assert sorted(image_counts) == [1, 3]
+        state = app.state.store.get(sweep_id)
+        assert state.books[0].title == ""
+        assert state.books[0].status == "unidentified"
+        assert [book.title for book in state.books[1:]] == ["Real Title"] * 3
+        assert all(len(book.crop_refs) == 3 for book in state.books)
+        assert all(app.state.store.crop_path(sweep_id, Path(ref).name).is_file() for book in state.books for ref in book.crop_refs)
+        completed = [stage for stage in state.reading_stages if stage.status == "completed"]
+        assert len(completed) == 2
+        assert all(stage.provider == "groq" and stage.model == "qwen/qwen3.8-27b" for stage in completed)
+        evidence = json.loads(app.state.store.stage_path(sweep_id, completed[0].persisted_ref).read_text())
+        assert evidence["model"] == "qwen/qwen3.8-27b"
+        assert evidence["usage"]["prompt_tokens"] in (2048, 6144)
+        assert evidence["cost_usd_estimate"] is None
+        assert set(evidence["sources"]).issubset(set(ids))
+        assert all(source["frame_id"] == frame_id for source in evidence["sources"].values())
+
+
+@pytest.mark.parametrize("variant,status_code", [
+    ("unknown_ref", 502),
+    ("missing_ref", 502),
+    ("malformed", 502),
+    ("refusal", 502),
+    ("quota", 429),
+])
+def test_groq_crop_rejects_untrusted_or_incomplete_reading(tmp_path, monkeypatch, variant, status_code):
+    monkeypatch.setenv("INVENTORY_PROVIDER", "groq")
+    monkeypatch.setenv("GROQ_API_KEY", "groq-test-only-token")
+    monkeypatch.delenv("VISION_ENABLED", raising=False)
+    app = server.create_app(tmp_path / "runs", allowed_origin=ORIGIN)
+    with TestClient(app) as groq_client:
+        sweep_id = start_sweep(groq_client).json()["id"]
+        _, refs = seed_book(groq_client, sweep_id)
+        result = [reading_for(refs[0])]
+        if variant == "unknown_ref":
+            result[0]["ref_id"] = "book_" + "a" * 32
+        elif variant == "missing_ref":
+            result = []
+        content = json.dumps({"readings": result}) if variant != "malformed" else "not-json"
+        message = {"role": "assistant", "content": content}
+        if variant == "refusal":
+            message = {"role": "assistant", "refusal": "fixture refusal"}
+        raw = {
+            "id": "groq_crop_bad",
+            "model": "qwen/qwen3.8-27b",
+            "choices": [{"index": 0, "finish_reason": "stop", "message": message}],
+        }
+        requests = stub_provider(
+            app, lambda request: httpx.Response(429 if variant == "quota" else 200, json=raw)
+        )
+        reply = post(groq_client, f"/api/sweeps/{sweep_id}/read_spines", json={})
+        assert reply.status_code == status_code
+        assert [request.url.host for request in requests] == ["api.groq.com"]
+        state = app.state.store.get(sweep_id)
+        assert state.books[0].title == ""
+        assert any(stage.status == "failed" and stage.provider == "groq" for stage in state.reading_stages)
+
+
+def test_groq_reading_stops_after_first_quota_failure(tmp_path, monkeypatch):
+    monkeypatch.setenv("INVENTORY_PROVIDER", "groq")
+    monkeypatch.setenv("GROQ_API_KEY", "groq-test-only-token")
+    monkeypatch.delenv("VISION_ENABLED", raising=False)
+    app = server.create_app(tmp_path / "runs", allowed_origin=ORIGIN)
+    with TestClient(app) as groq_client:
+        sweep_id = start_sweep(groq_client).json()["id"]
+        seed_book(groq_client, sweep_id, count=4)
+        requests = stub_provider(
+            app,
+            lambda request: httpx.Response(
+                429,
+                headers={"retry-after": "21", "x-ratelimit-remaining-tokens": "0"},
+                json={"error": "quota reached"},
+            ),
+        )
+        reply = post(groq_client, f"/api/sweeps/{sweep_id}/read_spines", json={})
+        assert reply.status_code == 429
+        assert len(requests) == 1
+        state = app.state.store.get(sweep_id)
+        assert all(book.title == "" for book in state.books)
+        assert any("retry-after=21" in (stage.error or "") for stage in state.reading_stages)
+        assert any("remaining-tokens=0" in (stage.error or "") for stage in state.reading_stages)
