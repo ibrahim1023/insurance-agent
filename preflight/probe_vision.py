@@ -67,7 +67,7 @@ async def probe(source, server, origin):
             if observation['image_width'] != width or observation['image_height'] != height:
                 raise ValueError('analysis dimensions disagree with independently decoded evidence')
             raw_scene = observation['observation']
-            contract = json.loads((Path(__file__).resolve().parents[1] / '.scratch/assessment-run/vision-contract.json').read_text())
+            contract = json.loads((Path(__file__).resolve().parents[1] / 'backend/vision_contract.json').read_text())
             mapping_options = {
                 'coordinate_system': observation.get('coordinate_system', 'normalized_1000'),
                 'sent_width': observation.get('sent_image_width'),
