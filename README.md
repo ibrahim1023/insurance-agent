@@ -29,7 +29,8 @@ Research recommendations are not installed models or implemented features.
 
 - Python 3.12 (tested via `.venv`)
 - Node.js — required only for the JS unit tests (`node --test`)
-- An OpenAI API key for realtime voice and model calls
+- An OpenAI API key for WebRTC voice and the default inventory provider
+- An optional Groq API key for opt-in scene analysis and spine reading; Groq listing discovery is still evidence-gated
 
 ## Install
 
@@ -42,6 +43,26 @@ cp .env.example .env     # then put your real OPENAI_API_KEY in .env
 
 `.env` stays local; it is ignored by `.gitignore` and must never be committed.
 Fresh-setup time: NOT MEASURED.
+
+### Optional Groq inventory provider
+
+`INVENTORY_PROVIDER=openai` keeps the existing behavior. Setting
+`INVENTORY_PROVIDER=groq` with a server-side `GROQ_API_KEY` selects Groq-hosted
+Qwen for saved-frame scene proposals and spine reading (one original crop per
+book; at most three images per reading request). OpenAI WebRTC voice remains
+unchanged and still requires its own key. No automatic Groq-to-OpenAI fallback
+is enabled. Provider failures and quota limits remain visible in saved stages;
+unsupported identities and the physical book count stay unknown.
+
+**Groq pricing discovery is not promoted.** The Groq-hosted GPT-OSS browser
+search adapter is mock-tested, but product pricing stops before that call until
+a separately approved public-book probe confirms machine-readable source URLs
+and access/cost. In Groq mode eligible book prices stay null with a
+`source_url_unverified` review reason; in default mode the existing OpenAI
+candidate discovery and retrieved-page quote checks remain as before. Groq is
+hosted, not local: enabling it during an actual sweep sends selected shelf
+frames and crop images to Groq. No real Groq request, private-image upload or
+price-accuracy benchmark has been run for this integration.
 
 ## Run (historically verified local launch)
 
@@ -77,8 +98,9 @@ For a development phone sweep with `VISION_ENABLED=true`, use **Start Sweep**, t
 3. **Read spine crops** — extracts evidence-linked text with conservative
    identification gates. Catalogue lookup and manual identity editing are not
    implemented; uncertain readings stay unidentified.
-4. **Retrieve prices** — UAE-first then fallback discovery; every priced claim
-   carries a source URL + retrieved timestamp.
+4. **Retrieve prices** — the default provider attempts UAE-first then fallback
+   discovery; every accepted price requires a retrievable source URL and timestamp.
+   Groq mode currently reports source-proof review instead of a model-produced price.
 5. **Stop Sweep** — saves the real end timing, returns promptly, and starts
    bounded post-sweep work in the background: per-sweep vision drain, selection
    of not-yet-analyzed saved frames within the existing call budget, repeated-view
@@ -93,10 +115,13 @@ For a development phone sweep with `VISION_ENABLED=true`, use **Start Sweep**, t
 6. **JSON / HTML** — open `claim_packet.json` and `report.html` from the UI or
    `GET /api/sweeps/{id}/claim_packet.json` / `.../report.html`.
 
-**Start sweep** also connects voice. Voice, selected voice snapshots, explicit
-model calls (analyze/read/price), and the post-sweep stages launched by **Stop
-Sweep** are **billed actions** — they consume OpenAI quota. Uploading frames
-and generating/publishing the packet artifact itself do not call models.
+**Start sweep** also connects voice. Voice and its selected snapshots still
+use OpenAI. With the default inventory provider, analyze/read and eligible
+price discovery can use OpenAI; with Groq selected, analyzed frames and crop
+reading can consume Groq quota instead. Groq price discovery currently makes
+no request and returns an explicit review reason. These hosted services may
+incur charges depending on your account. Uploading frames and generating the
+packet artifact itself do not call models.
 
 ### iPhone testing (local HTTPS)
 
@@ -126,9 +151,10 @@ Then open https://192.168.1.13:8443 in iPhone Safari. Prerequisites:
 - **Start Sweep** connects paid voice immediately and sends selected saved
   snapshots for voice context regardless of `VISION_ENABLED` (the flag only
   controls automatic per-frame analysis during capture, which the command
-  above enables for the next trial); Analyze/Read/Retrieve prices are billed
-  model calls, and **Stop Sweep** launches the billed post-sweep stages.
-  **End call** stops audio but leaves that work running.
+  above enables for the next trial); Analyze/Read can make hosted model calls,
+  and default-provider pricing can make search calls. In Groq mode price
+  discovery is gated and returns unknown. **Stop Sweep** launches bounded
+  post-sweep stages; **End call** stops audio but leaves that work running.
 - Earlier iPhone trials support lower-resolution capture delivery, owner-heard
   voice/interruption and normal-end partial processing. Higher-resolution voice
   concurrency, revised active guidance and complete inventory accuracy remain
@@ -141,9 +167,10 @@ Then open https://192.168.1.13:8443 in iPhone Safari. Prerequisites:
 node --test tests/backend/*.mjs tests/preflight/test_voice.mjs
 ```
 
-Latest local verification: **546 Python passed**, one existing Starlette/httpx
-deprecation warning; **160 JavaScript passed**, zero failed. These tests do not
-establish real-device, physical-count, title, price or measurement accuracy.
+Latest local verification: **572 Python passed, 4 skipped**, one existing
+Starlette/httpx deprecation warning; **160 JavaScript passed**, zero failed.
+The Groq-provider cases use synthetic evidence and mocked HTTP. These tests do
+not establish real-device, physical-count, title, price or measurement accuracy.
 
 ## Known blockers and limitations
 

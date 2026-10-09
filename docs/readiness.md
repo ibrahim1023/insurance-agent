@@ -14,8 +14,10 @@ This is the current status index. [Preflight results](preflight-results.md), dat
 | Physical book count | FAILING / unknown | 59 physical books → 71 provisional tracks, 58 duplicate flags, physical count null; frozen row detectors also fail |
 | Shelf atlas registration | OFFLINE INTERFACE ONLY | Local warp/parallax controls pass; detector and runtime integration absent |
 | Book identification | IMPLEMENTED; accuracy NOT MEASURED | Five accepted tracks in the 59-book trial; complete hand-legible truth absent |
+| Optional Groq scene/crop path | MOCK-VERIFIED; live provider/accuracy NOT MEASURED | Opt-in Qwen scene proposals and ≤3 original crops/request retain stage refs and quota failures. No Groq account call, private upload, fresh-device test or proven reading gain. OpenAI WebRTC voice unchanged |
 | Catalogue corroboration | NOT IMPLEMENTED | Model/store slot exists; no lookup adapter |
 | Book pricing | INTEGRITY IMPLEMENTED; coverage FAILING | Seeded 3/5 UAE new quotes, 0/5 used; integrated discovery 0/5 eligible URLs; saved sweeps have no accepted prices |
+| Groq pricing discovery | MOCK ADAPTER; SOURCE-PROOF GATED | GPT-OSS browser-search adapter exercises fake responses only; configured Groq sweeps skip real search/quote admission with `source_url_unverified` until a separately approved public-book probe validates machine-readable source URLs and access/cost |
 | Non-book classification | PROVISIONAL IMPLEMENTATION | No complete item ground truth / recall result |
 | Non-book prices/ranges | NOT IMPLEMENTED | Packet validation rejects populated prices |
 | Spine/shelf/room measurement | NOT IMPLEMENTED IN RUNTIME | A4 arithmetic probe exists; field corners/coplanarity/tape results BLOCKED; room fields null |
@@ -40,6 +42,21 @@ node --test tests/backend/*.mjs tests/preflight/test_voice.mjs
 The read-only [implementation review](2026-10-09-implementation-review.md) remains the failure baseline. Subsequent approved code work is recorded in `.scratch/assessment-run/panorama-progress.md`. No provider calls, checkpoints/dependencies, server launches, Git initialization or original-run rewrites were made in this recovery slice. Its final preservation check verifies three original states/packets and 315 saved JPEGs hash-unchanged. The full gate does not prove camera, count, identity, price or metric accuracy.
 
 Frozen local coverage accounting reports 137/15, 61/8 and 117/8 saved/successfully analyzed frames across the two five-book runs and the 59-book run. The offline six-slot selection simulation retains every saved-frame denominator and explicitly leaves 116/47/103 pending views nonselected; it is not paid replay, new inventory or physical coverage. Legacy quality scores and shelf-row identities remain unknown. Raw artifacts stay private under `.scratch/assessment-run/`.
+
+## Opt-in Groq checkpoint — offline only
+
+`INVENTORY_PROVIDER=groq` selects the server-side scene/crop adapters without any
+OpenAI image/pricing fallback; the OpenAI WebRTC voice path remains unchanged.
+Mocked Groq results retained original frame/crop provenance and unknown prices;
+429 responses were recorded and suppressed further same-sweep requests. In the
+isolated feature worktree, the full Python gate reported **572 passed, 4 skipped**,
+one existing Starlette/httpx warning; the full Node gate reported **160 passed**.
+All provider HTTP in those checks was `httpx.MockTransport`; no real Groq call,
+private-image upload, phone run or bill was made. The historical trial metrics
+above are not recalculated from those synthetic tests. Groq browser-search
+listing URLs are **BLOCKED** pending separately approved public-book evidence of
+machine-readable sources and tool availability/cost. Qwen preview API behavior,
+book reading/count accuracy and full-sweep latency are **NOT MEASURED**.
 
 ## Release decisions
 

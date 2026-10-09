@@ -245,6 +245,7 @@ class VisionManager:
     ):
         limits = contract["runtime_limits"]
         self._version = vision_cache_version(contract)
+        self._provider = contract.get("provider", "openai")
         self._min_interval_s = float(limits["minimum_live_call_interval_s"])
         self._max_calls = int(limits["maximum_calls_per_sweep"])
         self._max_post_calls = int(limits["maximum_post_sweep_calls"])
@@ -277,6 +278,7 @@ class VisionManager:
                 "ended_at": None,
                 "last_call_at": None,
                 "postwork_deadline": None,
+                "provider_rate_limited": False,
                 "task": None,
             },
         )
@@ -313,6 +315,10 @@ class VisionManager:
             cache = self._caches.get(sweep_id) or {}
             if sha is not None and f"{self._version}:{sha}" in cache:
                 return await self._analyze(sweep_id, frame_id, client)
+            if job["provider_rate_limited"]:
+                reason = "vision provider rate limit reached; further frames deferred"
+                self._record_skip(sweep_id, frame_id, reason)
+                raise StoreError(429, reason)
             if job["last_call_at"] is not None:
                 wait = self._min_interval_s - (self._clock() - job["last_call_at"])
                 if wait > 0:
@@ -338,6 +344,12 @@ class VisionManager:
                     job["post_seconds"] += self._clock() - started
                 self._record_skip(sweep_id, frame_id, "post-sweep time budget exhausted")
                 raise StoreError(503, "vision call exceeded remaining budget")
+            except StoreError as exc:
+                if self._provider == "groq" and exc.status_code == 429 and "rate limit" in exc.detail:
+                    job["provider_rate_limited"] = True
+                if job["ended"]:
+                    job["post_seconds"] += self._clock() - started
+                raise
             except Exception:
                 if job["ended"]:
                     job["post_seconds"] += self._clock() - started

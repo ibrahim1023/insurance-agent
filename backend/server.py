@@ -277,6 +277,7 @@ def create_app(runs_root: Path | None = None, *, allowed_origin: str | None = No
                         "stage": VisionStageRecord(
                             frame_id=frame_id,
                             status="skipped",
+                            provider=inventory_provider,
                             persisted_ref=None,
                             model=None,
                             cost_usd_estimate=None,

@@ -877,3 +877,41 @@ def test_groq_scene_rate_limit_records_retry_metadata(tmp_path, monkeypatch):
         assert stage.status == "failed" and stage.provider == "groq"
         assert "retry-after=15" in stage.error
         assert "remaining-tokens=0" in stage.error
+
+
+def test_groq_rate_limit_blocks_immediate_repeat_on_another_frame(tmp_path, monkeypatch):
+    monkeypatch.setenv("INVENTORY_PROVIDER", "groq")
+    monkeypatch.setenv("GROQ_API_KEY", "groq-test-only-token")
+    monkeypatch.delenv("VISION_ENABLED", raising=False)
+    app = server.create_app(tmp_path / "runs", allowed_origin=ORIGIN)
+    with TestClient(app) as groq_client:
+        requests = stub_provider(
+            app,
+            lambda request: httpx.Response(
+                429, headers={"retry-after": "30"}, json={"error": "quota reached"}
+            ),
+        )
+        sweep_id = start_sweep(groq_client).json()["id"]
+        first = upload_and_id(groq_client, sweep_id)
+        second = upload_and_id(groq_client, sweep_id, body=tiny_jpeg(width=32), ts="2.0")
+        assert analyze(groq_client, sweep_id, {"frame_id": first}).status_code == 429
+        assert analyze(groq_client, sweep_id, {"frame_id": second}).status_code == 429
+        assert len(requests) == 1
+        stage = app.state.store.get(sweep_id).vision_stages[-1]
+        assert stage.frame_id == second
+        assert stage.status == "skipped"
+        assert stage.provider == "groq"
+        assert "rate limit" in stage.error
+
+
+def test_groq_key_is_not_exposed_by_browser_routes(tmp_path, monkeypatch):
+    marker = "groq-test-only-secret-marker"
+    monkeypatch.setenv("INVENTORY_PROVIDER", "groq")
+    monkeypatch.setenv("GROQ_API_KEY", marker)
+    monkeypatch.delenv("VISION_ENABLED", raising=False)
+    app = server.create_app(tmp_path / "runs", allowed_origin=ORIGIN)
+    with TestClient(app) as groq_client:
+        for route in ("/", "/api/health", "/api/capture_config"):
+            reply = groq_client.get(route)
+            assert reply.status_code == 200
+            assert marker not in reply.text
