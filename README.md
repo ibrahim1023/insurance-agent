@@ -192,8 +192,9 @@ price or measurement accuracy.
   reading/pricing inventory. Offline shelf atlases are not integrated into claims.
   The isolated Grounding DINO tiny probe matched 12/14 owner-labelled upright
   spines with one false positive and two misses on its best fixed prompt;
-  candidate count error was 7.14%, above the ≤5% bar. It is not a validated
-  counter and was not added to the app.
+  candidate count error was 7.14%, above the ≤5% bar. Local SAM 2.1 tiny
+  automatic masks yielded only four spine-shaped matches out of 14 after a
+  fixed filter. Neither is a validated counter or added to the app.
 - **Live UAE discovery is blocked**: the real five-book AE/USD probe found
   0/5 product URLs and 0 accepted prices in 17.2 s — search returned
   homepages/irrelevant results. Automatic discovery needs improvement; this
