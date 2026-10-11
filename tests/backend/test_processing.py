@@ -1271,3 +1271,170 @@ def test_concurrent_success_stage_survives_attempt_skip(client):
     entry = by_frame[frames[0].id]
     assert entry["processing_status"] == "completed"
     assert len(entry["stage_refs"]) == 2
+
+
+def test_groq_postwork_never_uses_openai_reader(tmp_path, monkeypatch):
+    monkeypatch.setenv("INVENTORY_PROVIDER", "groq")
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-only-openai")
+    monkeypatch.delenv("VISION_ENABLED", raising=False)
+    app = server.create_app(tmp_path / "runs", allowed_origin=ORIGIN)
+    requests = []
+
+    async def override_client():
+        def record(request):
+            requests.append(request.url.host)
+            return httpx.Response(500, json={"error": "offline fixture"})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(record)) as client:
+            yield client
+
+    app.dependency_overrides[server.get_http_client] = override_client
+    with TestClient(app) as groq_client:
+        sweep_id = api_sweep(groq_client)
+        store = app.state.store
+        frame = _frame(store, sweep_id)
+        _tracks(store, sweep_id, frame.id, books=1)
+        _completed_vision_stage(store, sweep_id, frame.id)
+        post(groq_client, f"/api/sweeps/{sweep_id}/end", json={"duration_s": 2.0})
+        settled = wait_postwork(groq_client, sweep_id)
+        assert settled["postwork_status"] in TERMINAL
+        assert requests == []
+        assert any(
+            stage.status == "skipped" and stage.provider == "groq"
+            for stage in store.get(sweep_id).reading_stages
+        )
+
+
+def test_groq_failure_keeps_packet_partial_and_no_fallback(tmp_path, monkeypatch):
+    monkeypatch.setenv("INVENTORY_PROVIDER", "groq")
+    monkeypatch.setenv("GROQ_API_KEY", "groq-test-only-token")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-test-only-token")
+    monkeypatch.delenv("VISION_ENABLED", raising=False)
+    requests = []
+
+    def make_app():
+        app = server.create_app(tmp_path / "runs", allowed_origin=ORIGIN)
+
+        def record(request):
+            requests.append(request.url.host)
+            return httpx.Response(
+                429,
+                headers={"retry-after": "20", "x-ratelimit-remaining-tokens": "0"},
+                json={"error": "synthetic quota"},
+            )
+
+        async def override_client():
+            async with httpx.AsyncClient(transport=httpx.MockTransport(record), trust_env=False) as client:
+                yield client
+
+        app.dependency_overrides[server.get_http_client] = override_client
+        app.dependency_overrides[server.get_pricing_http_client] = override_client
+        return app
+
+    app = make_app()
+    with TestClient(app) as groq_client:
+        sweep_id = api_sweep(groq_client)
+        store = app.state.store
+        for index in range(3):
+            store.add_frame(sweep_id, jpeg(scene_image(seed=index + 15)), float(index + 1))
+        end = post(groq_client, f"/api/sweeps/{sweep_id}/end", json={"duration_s": 3.0})
+        assert end.status_code == 200
+        settled = wait_postwork(groq_client, sweep_id, timeout_s=30.0)
+        assert settled["status"] == "partial"
+        assert len(settled["coverage_manifest"]["entries"]) == 3
+        assert requests == ["api.groq.com"]
+        stages = store.get(sweep_id).vision_stages
+        assert any(stage.status == "failed" and stage.provider == "groq" for stage in stages)
+        assert all(stage.provider == "groq" for stage in stages)
+        assert all(stage.status in ("failed", "skipped") for stage in stages)
+        assert all(store.stage_path(sweep_id, stage.persisted_ref).is_file() for stage in stages if stage.persisted_ref)
+        packet = groq_client.get(f"/api/sweeps/{sweep_id}/claim_packet.json")
+        assert packet.status_code == 200
+        assert packet.json()["status"] == "partial"
+        assert packet.json()["physical_book_count"] is None
+        assert packet.json()["books"] == []
+    with TestClient(make_app()) as reopened:
+        assert reopened.get(f"/api/sweeps/{sweep_id}").status_code == 200
+        assert requests == ["api.groq.com"]
+
+
+def test_groq_postwork_mocked_scene_and_reading_leave_prices_unverified(tmp_path, monkeypatch):
+    monkeypatch.setenv("INVENTORY_PROVIDER", "groq")
+    monkeypatch.setenv("GROQ_API_KEY", "groq-test-only-token")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-test-only-token")
+    monkeypatch.delenv("VISION_ENABLED", raising=False)
+    app = server.create_app(tmp_path / "runs", allowed_origin=ORIGIN)
+    requests = []
+    observed = {
+        "books": [{
+            "bbox": {"left": 40, "top": 70, "right": 350, "bottom": 175},
+            "orientation": "upright",
+            "observed_title": "Clean Code",
+            "observed_author": "Robert C. Martin",
+            "observed_publisher": "",
+            "observed_edition": "",
+            "observed_isbn": "",
+            "title_legible": True,
+            "author_legible": True,
+            "existence_confidence": 0.96,
+            "text_confidence": 0.96,
+            "special_flags": [],
+            "visible_evidence": "printed spine title and author",
+        }],
+        "items": [],
+        "unresolved_groups": [],
+        "capture_issues": [],
+    }
+
+    def record(request):
+        requests.append(request.url.host)
+        payload = json.loads(request.content)
+        text = payload["messages"][1]["content"][0]["text"]
+        if text.startswith("ref_ids: "):
+            refs = json.loads(text.removeprefix("ref_ids: "))
+            content = json.dumps({"readings": [
+                {
+                    "ref_id": ref, "title": "Clean Code", "author": "Robert C. Martin",
+                    "publisher": "", "edition": "", "isbn": "", "title_legible": True,
+                    "author_legible": True, "confidence": 0.96,
+                    "visible_text": ["Clean Code", "Robert C. Martin"],
+                }
+                for ref in refs
+            ]})
+        else:
+            content = json.dumps(observed)
+        return httpx.Response(200, json={
+            "id": "groq_stage_fixture",
+            "model": "qwen/qwen3.8-27b",
+            "choices": [{
+                "index": 0, "finish_reason": "stop",
+                "message": {"role": "assistant", "content": content},
+            }],
+            "usage": {"prompt_tokens": 2048, "completion_tokens": 125},
+        })
+
+    async def override_client():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(record), trust_env=False) as client:
+            yield client
+
+    app.dependency_overrides[server.get_http_client] = override_client
+    app.dependency_overrides[server.get_pricing_http_client] = override_client
+    with TestClient(app) as groq_client:
+        sweep_id = api_sweep(groq_client)
+        image = np.full((360, 640, 3), 255, dtype=np.uint8)
+        cv2.putText(image, "Clean Code", (50, 115), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2)
+        cv2.putText(image, "Robert C. Martin", (50, 160), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 0), 2)
+        app.state.store.add_frame(sweep_id, jpeg(image), 1.0)
+        assert post(groq_client, f"/api/sweeps/{sweep_id}/end", json={"duration_s": 1.0}).status_code == 200
+        settled = wait_postwork(groq_client, sweep_id)
+        assert requests == ["api.groq.com", "api.groq.com"]
+        assert len(settled["books"]) == 1
+        assert settled["books"][0]["title"] == "Clean Code"
+        assert settled["books"][0]["replacement_cost"] is None
+        assert any("source_url_unverified" in review["reason"] for review in settled["review_queue"])
+        packet = groq_client.get(f"/api/sweeps/{sweep_id}/claim_packet.json")
+        assert packet.status_code == 200
+        assert packet.json()["status"] == "partial"
+        assert packet.json()["physical_book_count"] is None
+        assert packet.json()["metrics"]["model_cost_unknown_count"] == 2

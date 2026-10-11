@@ -1,0 +1,13 @@
+{
+  "provider": "groq",
+  "version": "groq-scene-v1",
+  "model": "qwen/qwen3.8-27b",
+  "endpoint": "https://api.groq.com/openai/v1/chat/completions",
+  "coordinate_system": "pixels",
+  "request_configuration": {
+    "reasoning_effort": "none",
+    "max_completion_tokens": 6000,
+    "request_timeout_s": 60,
+    "automatic_retries": 0
+  }
+}

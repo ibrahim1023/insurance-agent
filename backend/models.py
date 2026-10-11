@@ -446,6 +446,7 @@ class VisionStageRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
     frame_id: str
     status: Literal["completed", "failed", "cached", "skipped"]
+    provider: Literal["openai", "groq"] | None = None
     persisted_ref: str | None = None
     model: str | None = None
     cost_usd_estimate: str | None = None
@@ -457,6 +458,7 @@ class ReadingStageRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
     ref_ids: list[str] = Field(default_factory=list)
     status: Literal["completed", "failed", "skipped", "running", "interrupted"]
+    provider: Literal["openai", "groq"] | None = None
     persisted_ref: str | None = None
     model: str | None = None
     cost_usd_estimate: str | None = None
@@ -469,6 +471,7 @@ class PricingStageRecord(BaseModel):
     kind: Literal["discovery", "source", "valuation"]
     ref_ids: list[str] = Field(default_factory=list)
     status: Literal["completed", "failed", "skipped", "running", "interrupted", "cached"]
+    provider: Literal["openai", "groq"] | None = None
     persisted_ref: str | None = None
     model: str | None = None
     usage: dict | None = None

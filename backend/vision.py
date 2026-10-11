@@ -21,8 +21,29 @@ def load_contract(path: Path) -> dict:
     return json.loads(Path(path).read_text())
 
 
+def vision_cache_version(contract: dict) -> str:
+    version = str(contract.get("version", ""))
+    if contract.get("provider") != "groq":
+        return version
+    fingerprint = hashlib.sha256(
+        json.dumps(
+            {
+                "provider": "groq",
+                "model": contract["model"],
+                "instructions": contract["instructions"],
+                "response_format": contract["response_format"],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    return f"groq:{version}:{fingerprint}"
+
+
 def _failure_status(exc: VisionError) -> int:
     message = str(exc)
+    if "rate limit" in message:
+        return 429
     if "unavailable" in message:
         return 503
     return 502
@@ -39,11 +60,13 @@ async def analyze_sweep_frame(
     sha_cache: dict,
     tracking_contract: dict | None = None,
     clock=time.monotonic,
+    observer=observe_jpeg,
 ) -> dict:
     path = store.frame_path(sweep_id, frame_id)
     jpeg = path.read_bytes()
     sha = hashlib.sha256(jpeg).hexdigest()
-    cache_key = f"{contract.get('version', '')}:{sha}"
+    provider = contract.get("provider", "openai")
+    cache_key = f"{vision_cache_version(contract)}:{sha}"
     cached = sha_cache.get(cache_key)
     started = clock()
     if cached is not None:
@@ -63,6 +86,7 @@ async def analyze_sweep_frame(
                 "stage": VisionStageRecord(
                     frame_id=frame_id,
                     status="cached",
+                    provider=provider,
                     persisted_ref=cached["stage_ref"],
                     model=cached["model"],
                     cost_usd_estimate="0",
@@ -78,10 +102,14 @@ async def analyze_sweep_frame(
     if not api_key:
         raise StoreError(503, "OPENAI_API_KEY not configured")
     try:
-        result = await observe_jpeg(client, jpeg, api_key, contract)
+        result = await observer(client, jpeg, api_key, contract)
     except VisionError as exc:
         elapsed_ms = (clock() - started) * 1000.0
         reason = str(exc)
+        raw_response = getattr(exc, "raw_response", None)
+        raw_response = raw_response if isinstance(raw_response, dict) else None
+        actual_model = raw_response.get("model") if raw_response is not None else None
+        actual_model = actual_model if isinstance(actual_model, str) else None
         ref = store.persist_stage(
             sweep_id,
             f"vision_{frame_id}_{uuid.uuid4().hex}.json",
@@ -89,8 +117,13 @@ async def analyze_sweep_frame(
                 {
                     "frame_id": frame_id,
                     "status": "failed",
+                    "provider": provider,
                     "error": reason,
                     "elapsed_ms": elapsed_ms,
+                    "raw_response": raw_response,
+                    "model": actual_model,
+                    "response_id": raw_response.get("id") if raw_response is not None else None,
+                    "usage": raw_response.get("usage") if raw_response is not None else None,
                 }
             ).encode(),
         )
@@ -101,8 +134,9 @@ async def analyze_sweep_frame(
                 "stage": VisionStageRecord(
                     frame_id=frame_id,
                     status="failed",
+                    provider=provider,
                     persisted_ref=ref,
-                    model=None,
+                    model=actual_model,
                     cost_usd_estimate=None,
                     elapsed_ms=elapsed_ms,
                     error=reason,
@@ -130,6 +164,7 @@ async def analyze_sweep_frame(
             {
                 "frame_id": frame_id,
                 "status": "completed",
+                "provider": provider,
                 "scene": scene,
                 "raw_response": result["raw_response"],
                 "usage": result["usage"],
@@ -169,6 +204,7 @@ async def analyze_sweep_frame(
             "stage": VisionStageRecord(
                 frame_id=frame_id,
                 status="completed",
+                provider=provider,
                 persisted_ref=ref,
                 model=result["model"],
                 cost_usd_estimate=result["cost_usd_estimate"],
@@ -216,7 +252,8 @@ class VisionManager:
         sha_for=None,
     ):
         limits = contract["runtime_limits"]
-        self._version = str(contract.get("version", ""))
+        self._version = vision_cache_version(contract)
+        self._provider = contract.get("provider", "openai")
         self._min_interval_s = float(limits["minimum_live_call_interval_s"])
         self._max_calls = int(limits["maximum_calls_per_sweep"])
         self._max_post_calls = int(limits["maximum_post_sweep_calls"])
@@ -249,6 +286,7 @@ class VisionManager:
                 "ended_at": None,
                 "last_call_at": None,
                 "postwork_deadline": None,
+                "provider_rate_limited": False,
                 "task": None,
             },
         )
@@ -285,6 +323,10 @@ class VisionManager:
             cache = self._caches.get(sweep_id) or {}
             if sha is not None and f"{self._version}:{sha}" in cache:
                 return await self._analyze(sweep_id, frame_id, client)
+            if job["provider_rate_limited"]:
+                reason = "vision provider rate limit reached; further frames deferred"
+                self._record_skip(sweep_id, frame_id, reason)
+                raise StoreError(429, reason)
             if job["last_call_at"] is not None:
                 wait = self._min_interval_s - (self._clock() - job["last_call_at"])
                 if wait > 0:
@@ -310,6 +352,12 @@ class VisionManager:
                     job["post_seconds"] += self._clock() - started
                 self._record_skip(sweep_id, frame_id, "post-sweep time budget exhausted")
                 raise StoreError(503, "vision call exceeded remaining budget")
+            except StoreError as exc:
+                if self._provider == "groq" and exc.status_code == 429 and "rate limit" in exc.detail:
+                    job["provider_rate_limited"] = True
+                if job["ended"]:
+                    job["post_seconds"] += self._clock() - started
+                raise
             except Exception:
                 if job["ended"]:
                     job["post_seconds"] += self._clock() - started

@@ -12,7 +12,11 @@ import pytest
 from preflight.vision import VisionError, observe_jpeg, proposal_boxes, usage_cost
 
 
-CONTRACT = json.loads((Path(__file__).resolve().parents[2] / '.scratch/assessment-run/vision-contract.json').read_text())
+CONTRACT = json.loads((Path(__file__).resolve().parents[2] / 'backend/vision_contract.json').read_text())
+CONTRACT['coordinate_system'] = 'normalized_1000'
+CONTRACT['instructions'] = 'Inspect only the supplied image. Return integer 0..1000 coordinates on each image axis. Do not infer unseen items, titles, dimensions or prices.'
+for axis in ('left', 'top', 'right', 'bottom'):
+    CONTRACT['response_format']['schema']['$defs']['box']['properties'][axis]['maximum'] = 1000
 
 
 def scene():
@@ -52,7 +56,7 @@ def run(payload, status_code=200, contract=CONTRACT):
     return asyncio.run(execute()), requests
 
 
-def test_observation_uses_lead_contract_without_truth_or_filename():
+def test_observation_uses_committed_normalized_fixture_without_truth_or_filename():
     result, requests = run(response())
     assert len(requests) == 1
     payload = requests[0]

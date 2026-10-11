@@ -496,6 +496,8 @@ def _metrics(state, started):
     def collect(family, records, model_stage):
         nonlocal any_cost, model_unknown, latency_missing, known_cost
         for record in records:
+            if getattr(record, "status", None) == "skipped":
+                continue
             if record.elapsed_ms is not None:
                 call_sums[family] += Decimal(str(record.elapsed_ms))
                 call_seen[family] = True

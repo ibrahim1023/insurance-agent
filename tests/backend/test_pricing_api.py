@@ -421,3 +421,61 @@ def test_price_books_response_and_state_suppress_after_late_exclusion(
     loaded = client.get(f"/api/sweeps/{sid}").json()
     assert loaded["books"][0]["replacement_cost"] is None
     assert body["reviews_added"] == len(loaded["review_queue"]) - before
+
+
+def test_groq_pricing_missing_key_never_calls_openai(tmp_path, monkeypatch):
+    monkeypatch.setenv("INVENTORY_PROVIDER", "groq")
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", TEST_KEY)
+    monkeypatch.delenv("VISION_ENABLED", raising=False)
+    app = server.create_app(tmp_path / "runs", allowed_origin=ORIGIN)
+    with TestClient(app) as groq_client:
+        sweep_id = start_sweep(groq_client).json()["id"]
+        book_id = seed_identified_book(groq_client, sweep_id)
+        requests = stub_pricing(
+            app, lambda request: httpx.Response(200, json=discovery_response(book_id))
+        )
+        reply = post(groq_client, f"/api/sweeps/{sweep_id}/price_books", json={})
+        assert reply.status_code == 503
+        assert requests == []
+        stages = app.state.store.get(sweep_id).price_stages
+        assert any(
+            stage.kind == "discovery"
+            and stage.status == "skipped"
+            and stage.provider == "groq"
+            and "GROQ_API_KEY" in (stage.error or "")
+            for stage in stages
+        )
+
+
+def test_groq_discovery_without_verified_source_cannot_price(tmp_path, monkeypatch):
+    monkeypatch.setenv("INVENTORY_PROVIDER", "groq")
+    monkeypatch.setenv("GROQ_API_KEY", "groq-test-only-token")
+    monkeypatch.setenv("OPENAI_API_KEY", TEST_KEY)
+    monkeypatch.delenv("VISION_ENABLED", raising=False)
+    app = server.create_app(tmp_path / "runs", allowed_origin=ORIGIN)
+    with TestClient(app) as groq_client:
+        sweep_id = start_sweep(groq_client).json()["id"]
+        book_id = seed_identified_book(groq_client, sweep_id)
+        requests = stub_pricing(
+            app, lambda request: httpx.Response(200, json=discovery_response(book_id))
+        )
+        reply = post(groq_client, f"/api/sweeps/{sweep_id}/price_books", json={})
+        assert reply.status_code == 200, reply.text
+        assert requests == []
+        valuations = reply.json()["valuations"][book_id]
+        assert valuations["replacement"] is None
+        assert valuations["used"] is None
+        state = app.state.store.get(sweep_id)
+        assert state.books[0].replacement_cost is None
+        assert state.books[0].used_value is None
+        assert any("source_url_unverified" in review.reason for review in state.review_queue)
+        assert any(
+            stage.kind == "discovery"
+            and stage.status == "skipped"
+            and stage.provider == "groq"
+            and stage.usage is None
+            and stage.cost_usd_estimate is None
+            and "source_url_unverified" in (stage.error or "")
+            for stage in state.price_stages
+        )

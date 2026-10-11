@@ -616,7 +616,8 @@ async def price_books(
             )
     if reviews:
         store.append_reviews(sweep_id, reviews)
-    if not eligible:
+
+    def unpriced_result(reason=None):
         return {
             "sweep_id": sweep_id,
             "valuations": {
@@ -624,7 +625,7 @@ async def price_books(
                     "replacement": None,
                     "used": None,
                     "needs_appraisal": known[bid].status == "needs_appraisal",
-                    "skipped": entry["skipped"],
+                    "skipped": entry["skipped"] or reason,
                     "source_notes": [],
                 }
                 for bid, entry in results.items()
@@ -632,6 +633,25 @@ async def price_books(
             "reviews_added": len(store.get(sweep_id).review_queue) - initial_reviews,
             "partial": True,
         }
+
+    if not eligible:
+        return unpriced_result()
+    if contract.get("provider") == "groq":
+        reason = "source_url_unverified: Groq browser-search source URLs not established"
+        store.record_price_stage(
+            sweep_id,
+            PricingStageRecord(
+                kind="discovery",
+                ref_ids=[book.id for book in eligible],
+                status="skipped",
+                provider="groq",
+                error=reason,
+            ),
+        )
+        store.append_reviews(
+            sweep_id, [ReviewItem(ref_id=book.id, reason=reason) for book in eligible]
+        )
+        return unpriced_result(reason)
     if not api_key and provider is None:
         raise StoreError(503, "OPENAI_API_KEY not configured")
     fetcher = resolver or default_resolver

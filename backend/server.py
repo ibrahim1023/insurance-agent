@@ -4,6 +4,7 @@ import json
 import math
 import os
 import re
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
@@ -14,7 +15,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-from .models import CorrectionIntent, VisionStageRecord
+from .groq_image import observe_groq_jpeg, read_groq_crops
+from .models import CorrectionIntent, PricingStageRecord, ReadingStageRecord, VisionStageRecord
 from .price_sources import default_resolver
 from .pricing import PricingManager, load_pricing_contract, price_books
 from .processing import PostSweepProcessor
@@ -34,14 +36,38 @@ BASE_DIR = Path(__file__).resolve().parent
 WEB_DIR = BASE_DIR / "web"
 VOICE_PATH = PROJECT_ROOT / "preflight" / "safari" / "voice.js"
 VISION_CONTRACT = load_contract(BASE_DIR / "vision_contract.json")
+GROQ_VISION_PROFILE = load_contract(BASE_DIR / "groq_vision_contract.json")
+GROQ_VISION_CONTRACT = {
+    **{key: value for key, value in VISION_CONTRACT.items() if key != "cost_evidence"},
+    **GROQ_VISION_PROFILE,
+}
 TRACKING_CONTRACT = load_contract(BASE_DIR / "tracking_contract.json")
 READING_CONTRACT = load_reading_contract(BASE_DIR / "reading_contract.json")
+GROQ_READING_PROFILE = load_reading_contract(BASE_DIR / "groq_reading_contract.json")
+GROQ_READING_CONTRACT = {
+    **{key: value for key, value in READING_CONTRACT.items() if key != "cost_evidence"},
+    **GROQ_READING_PROFILE,
+    "selection": {**READING_CONTRACT["selection"], **GROQ_READING_PROFILE["selection"]},
+}
 PRICING_CONTRACT = load_pricing_contract(BASE_DIR / "pricing_contract.json")
+GROQ_PRICING_PROFILE = load_pricing_contract(BASE_DIR / "groq_pricing_contract.json")
+GROQ_PRICING_CONTRACT = {
+    **{key: value for key, value in PRICING_CONTRACT.items() if key not in ("cost_evidence", "response_format")},
+    **GROQ_PRICING_PROFILE,
+}
 REALTIME_CONTRACT = load_contract(BASE_DIR / "realtime_contract.json")
 OPENAI_CALLS_URL = "https://api.openai.com/v1/realtime/calls"
 MAX_SDP_BYTES = 65536
 MAX_JSON_BYTES = 131072
 REQUEST_TIMEOUT = 30.0
+
+
+def resolve_inventory_provider(value: str | None) -> Literal["openai", "groq"]:
+    if value is None:
+        return "openai"
+    if value not in ("openai", "groq"):
+        raise ValueError("unsupported inventory provider")
+    return value
 
 
 class StartSweepRequest(BaseModel):
@@ -182,24 +208,54 @@ def create_app(runs_root: Path | None = None, *, allowed_origin: str | None = No
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        inventory_provider = resolve_inventory_provider(os.environ.get("INVENTORY_PROVIDER"))
         store = SweepStore(root)
         app.state.store = store
+        app.state.inventory_provider = inventory_provider
         vision_enabled = os.environ.get("VISION_ENABLED", "").strip().lower() in (
             "1",
             "true",
             "yes",
         )
 
+        vision_contract = GROQ_VISION_CONTRACT if inventory_provider == "groq" else VISION_CONTRACT
+
         async def default_analyze(sweep_id, frame_id, client):
+            if inventory_provider == "groq" and not os.environ.get("GROQ_API_KEY"):
+                store.frame_path(sweep_id, frame_id)
+                reason = "GROQ_API_KEY not configured"
+                ref = store.persist_stage(
+                    sweep_id,
+                    f"vision_{frame_id}_{uuid.uuid4().hex}.json",
+                    json.dumps(
+                        {"frame_id": frame_id, "status": "failed", "provider": "groq", "error": reason}
+                    ).encode(),
+                )
+                store.record_observation(
+                    sweep_id,
+                    frame_id,
+                    {
+                        "stage": VisionStageRecord(
+                            frame_id=frame_id,
+                            status="failed",
+                            provider="groq",
+                            persisted_ref=ref,
+                            error=reason,
+                        ),
+                        "observation": None,
+                    },
+                )
+                raise StoreError(503, reason)
             return await analyze_sweep_frame(
                 store,
                 sweep_id,
                 frame_id,
                 client=client,
-                api_key=os.environ.get("OPENAI_API_KEY"),
-                contract=VISION_CONTRACT,
+                api_key=os.environ.get("GROQ_API_KEY" if inventory_provider == "groq" else "OPENAI_API_KEY"),
+                contract=vision_contract,
                 sha_cache=manager.sha_cache(sweep_id),
                 tracking_contract=TRACKING_CONTRACT,
+                **({"observer": observe_groq_jpeg} if inventory_provider == "groq" else {}),
             )
 
         def sha_for(sweep_id, frame_id):
@@ -221,6 +277,7 @@ def create_app(runs_root: Path | None = None, *, allowed_origin: str | None = No
                         "stage": VisionStageRecord(
                             frame_id=frame_id,
                             status="skipped",
+                            provider=inventory_provider,
                             persisted_ref=None,
                             model=None,
                             cost_usd_estimate=None,
@@ -233,26 +290,96 @@ def create_app(runs_root: Path | None = None, *, allowed_origin: str | None = No
             except StoreError:
                 pass
 
+        async def selected_groq_read_spines(
+            target_store, sweep_id, *, client=None, api_key=None, contract=None,
+            ref_ids=None, manager=None, **kwargs
+        ):
+            if api_key:
+                return await read_spines(
+                    target_store,
+                    sweep_id,
+                    client=client,
+                    api_key=api_key,
+                    contract=contract or GROQ_READING_CONTRACT,
+                    ref_ids=ref_ids,
+                    manager=manager or app.state.reading,
+                    crop_provider=read_groq_crops,
+                )
+            state = target_store.get(sweep_id)
+            if not state.books:
+                raise StoreError(409, "no recorded book tracks; analyze a saved frame before reading spines")
+            known = {book.id for book in state.books}
+            if ref_ids is not None and set(ref_ids) - known:
+                raise StoreError(404, "unknown reading target")
+            targets = [
+                book.id for book in state.books
+                if not book.excluded and (ref_ids is None or book.id in ref_ids)
+            ]
+            reason = "GROQ_API_KEY not configured"
+            target_store.record_reading_stage(
+                sweep_id,
+                ReadingStageRecord(ref_ids=targets, status="skipped", provider="groq", error=reason),
+            )
+            raise StoreError(503, reason)
+
+        async def selected_groq_price_books(
+            target_store, sweep_id, *, client=None, api_key=None, contract=None,
+            book_ids=None, manager=None, resolver=None, **kwargs
+        ):
+            if api_key:
+                return await price_books(
+                    target_store,
+                    sweep_id,
+                    client=client,
+                    api_key=api_key,
+                    contract=contract or GROQ_PRICING_CONTRACT,
+                    book_ids=book_ids,
+                    manager=manager or app.state.pricing,
+                    resolver=resolver,
+                )
+            state = target_store.get(sweep_id)
+            known = {book.id for book in state.books}
+            if book_ids is not None and set(book_ids) - known:
+                raise StoreError(404, "unknown pricing target")
+            reason = "GROQ_API_KEY not configured"
+            target_store.record_price_stage(
+                sweep_id,
+                PricingStageRecord(
+                    kind="discovery",
+                    ref_ids=book_ids if book_ids is not None else [book.id for book in state.books],
+                    status="skipped",
+                    provider="groq",
+                    error=reason,
+                ),
+            )
+            raise StoreError(503, reason)
+
+        app.state.groq_reader = selected_groq_read_spines
+        app.state.groq_pricer = selected_groq_price_books
         manager = VisionManager(
             analyze=default_analyze,
-            contract=VISION_CONTRACT,
+            contract=vision_contract,
             enabled=vision_enabled,
             record_skip=record_skip,
             client_factory=lambda: httpx.AsyncClient(timeout=REQUEST_TIMEOUT),
             sha_for=sha_for,
         )
         app.state.vision = manager
-        app.state.reading = ReadingManager(READING_CONTRACT)
-        app.state.pricing = PricingManager(PRICING_CONTRACT)
+        app.state.reading = ReadingManager(
+            GROQ_READING_CONTRACT if inventory_provider == "groq" else READING_CONTRACT
+        )
+        app.state.pricing = PricingManager(
+            GROQ_PRICING_CONTRACT if inventory_provider == "groq" else PRICING_CONTRACT
+        )
         app.state.postwork = PostSweepProcessor(
             store=store,
             vision=manager,
             reading=app.state.reading,
             pricing=app.state.pricing,
-            reader=_dep_value(app, get_reader),
-            pricer=price_books,
+            reader=(lambda: selected_groq_read_spines) if inventory_provider == "groq" else _dep_value(app, get_reader),
+            pricer=selected_groq_price_books if inventory_provider == "groq" else price_books,
             resolver=_dep_value(app, get_pricing_resolver),
-            api_key=lambda: os.environ.get("OPENAI_API_KEY"),
+            api_key=lambda: os.environ.get("GROQ_API_KEY" if inventory_provider == "groq" else "OPENAI_API_KEY"),
             client_factory=_managed_dep(app, get_http_client),
             pricing_client_factory=_managed_dep(app, get_pricing_http_client),
             tracking_contract=TRACKING_CONTRACT,
@@ -419,6 +546,14 @@ def create_app(runs_root: Path | None = None, *, allowed_origin: str | None = No
         check_origin(request)
         require_idle_postwork(sweep_id)
         body = await parse_json_body(request, ReadSpinesRequest)
+        if app.state.inventory_provider == "groq":
+            return await app.state.groq_reader(
+                app.state.store,
+                sweep_id,
+                client=client,
+                api_key=os.environ.get("GROQ_API_KEY"),
+                ref_ids=body.ref_ids,
+            )
         return await reader(
             app.state.store,
             sweep_id,
@@ -439,6 +574,15 @@ def create_app(runs_root: Path | None = None, *, allowed_origin: str | None = No
         check_origin(request)
         require_idle_postwork(sweep_id)
         body = await parse_json_body(request, PriceBooksRequest)
+        if app.state.inventory_provider == "groq":
+            return await app.state.groq_pricer(
+                app.state.store,
+                sweep_id,
+                client=client,
+                api_key=os.environ.get("GROQ_API_KEY"),
+                book_ids=body.book_ids,
+                resolver=resolver,
+            )
         return await price_books(
             app.state.store,
             sweep_id,
