@@ -25,6 +25,13 @@ def _rate_limit_reason(prefix: str, headers: httpx.Headers) -> str:
     return reason
 
 
+def _groq_schema_format(contract_format: dict) -> dict:
+    return {
+        "type": "json_schema",
+        "json_schema": {key: value for key, value in contract_format.items() if key != "type"},
+    }
+
+
 async def observe_groq_jpeg(client: httpx.AsyncClient, jpeg: bytes, api_key: str, contract: dict) -> dict:
     if not api_key:
         raise VisionError("vision provider unavailable")
@@ -75,10 +82,7 @@ async def observe_groq_jpeg(client: httpx.AsyncClient, jpeg: bytes, api_key: str
         "reasoning_effort": settings["reasoning_effort"],
         "max_completion_tokens": settings["max_completion_tokens"],
         "stream": False,
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": response_format,
-        },
+        "response_format": _groq_schema_format(response_format),
     }
     try:
         response = await client.post(
@@ -167,10 +171,7 @@ async def read_groq_crops(
         "reasoning_effort": settings["reasoning_effort"],
         "max_completion_tokens": settings["max_completion_tokens"],
         "stream": False,
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": contract["response_format"],
-        },
+        "response_format": _groq_schema_format(contract["response_format"]),
     }
     try:
         response = await client.post(

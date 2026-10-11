@@ -753,6 +753,7 @@ def test_groq_scene_stage_and_cache_provenance(tmp_path, monkeypatch):
         assert payload["model"] == "qwen/qwen3.8-27b"
         assert payload["response_format"]["type"] == "json_schema"
         assert payload["response_format"]["json_schema"]["strict"] is True
+        assert set(payload["response_format"]["json_schema"]) == {"name", "strict", "schema"}
         images = [part for part in payload["messages"][1]["content"] if part["type"] == "image_url"]
         assert len(images) == 1
         assert images[0]["image_url"]["url"].startswith("data:image/jpeg;base64,")

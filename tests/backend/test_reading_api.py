@@ -741,6 +741,10 @@ def test_groq_crop_batch_is_bounded_and_preserves_unknowns(tmp_path, monkeypatch
         assert reply.status_code == 200, reply.text
         assert reply.json()["batches"] == 2
         assert [request.url.host for request in requests] == ["api.groq.com"] * 2
+        for request in requests:
+            response_format = json.loads(request.content)["response_format"]
+            assert response_format["type"] == "json_schema"
+            assert set(response_format["json_schema"]) == {"name", "strict", "schema"}
         image_counts = [
             sum(part["type"] == "image_url" for part in json.loads(req.content)["messages"][1]["content"])
             for req in requests
