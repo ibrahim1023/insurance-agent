@@ -51,7 +51,10 @@ Mocked Groq results retained original frame/crop provenance and unknown prices;
 429 responses were recorded and suppressed further same-sweep requests. In the
 isolated feature worktree, the full Python gate reported **572 passed, 4 skipped**,
 one existing Starlette/httpx warning; the full Node gate reported **160 passed**.
-All provider HTTP in those checks was `httpx.MockTransport`; no real Groq call,
+On local merged `main`, with the ignored fixtures present, Python reported
+**576 passed**, zero skipped; Node again reported **160 passed**. This difference
+is fixture availability, not extra model evidence. All provider HTTP in those
+checks was `httpx.MockTransport`; no real Groq call,
 private-image upload, phone run or bill was made. The historical trial metrics
 above are not recalculated from those synthetic tests. Groq browser-search
 listing URLs are **BLOCKED** pending separately approved public-book evidence of

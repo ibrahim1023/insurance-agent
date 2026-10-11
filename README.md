@@ -167,10 +167,12 @@ Then open https://192.168.1.13:8443 in iPhone Safari. Prerequisites:
 node --test tests/backend/*.mjs tests/preflight/test_voice.mjs
 ```
 
-Latest local verification: **572 Python passed, 4 skipped**, one existing
+Latest local `main` verification: **576 Python passed**, one existing
 Starlette/httpx deprecation warning; **160 JavaScript passed**, zero failed.
-The Groq-provider cases use synthetic evidence and mocked HTTP. These tests do
-not establish real-device, physical-count, title, price or measurement accuracy.
+The clean feature worktree passed 572 Python tests with 4 skipped because it
+lacked ignored local fixtures. Groq-provider cases use synthetic evidence and
+mocked HTTP; these tests do not establish real-device, physical-count, title,
+price or measurement accuracy.
 
 ## Known blockers and limitations
 
