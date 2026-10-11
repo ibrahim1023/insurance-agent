@@ -795,6 +795,7 @@ def test_groq_scene_rejects_unusable_provider_output(tmp_path, monkeypatch, vari
             "finish_reason": "stop",
             "message": {"role": "assistant", "content": json.dumps(scene())},
         }],
+        "usage": {"prompt_tokens": 21, "completion_tokens": 3},
     }
     if variant == "refusal":
         raw["choices"][0]["message"] = {"role": "assistant", "refusal": "fixture refusal"}
@@ -818,6 +819,13 @@ def test_groq_scene_rejects_unusable_provider_output(tmp_path, monkeypatch, vari
         state = app.state.store.get(sweep_id)
         assert all(stage.status != "completed" for stage in state.vision_stages)
         assert any(stage.status == "failed" and stage.provider == "groq" for stage in state.vision_stages)
+        if variant == "malformed":
+            stage = next(stage for stage in state.vision_stages if stage.status == "failed")
+            artifact = json.loads(app.state.store.stage_path(sweep_id, stage.persisted_ref).read_text())
+            assert artifact["raw_response"]["id"] == "groq_response_bad"
+            assert artifact["usage"]["prompt_tokens"] == 21
+            assert artifact["model"] == "qwen/qwen3.8-27b"
+            assert stage.model == "qwen/qwen3.8-27b"
 
 
 def test_groq_scene_downscales_only_the_sent_image(tmp_path, monkeypatch):

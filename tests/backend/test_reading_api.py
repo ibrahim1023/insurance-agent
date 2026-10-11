@@ -795,6 +795,7 @@ def test_groq_crop_rejects_untrusted_or_incomplete_reading(tmp_path, monkeypatch
             "id": "groq_crop_bad",
             "model": "qwen/qwen3.8-27b",
             "choices": [{"index": 0, "finish_reason": "stop", "message": message}],
+            "usage": {"prompt_tokens": 31, "completion_tokens": 4},
         }
         requests = stub_provider(
             app, lambda request: httpx.Response(429 if variant == "quota" else 200, json=raw)
@@ -805,6 +806,13 @@ def test_groq_crop_rejects_untrusted_or_incomplete_reading(tmp_path, monkeypatch
         state = app.state.store.get(sweep_id)
         assert state.books[0].title == ""
         assert any(stage.status == "failed" and stage.provider == "groq" for stage in state.reading_stages)
+        if variant == "malformed":
+            stage = next(stage for stage in state.reading_stages if stage.status == "failed")
+            artifact = json.loads(app.state.store.stage_path(sweep_id, stage.persisted_ref).read_text())
+            assert artifact["raw_response"]["id"] == "groq_crop_bad"
+            assert artifact["usage"]["prompt_tokens"] == 31
+            assert artifact["model"] == "qwen/qwen3.8-27b"
+            assert stage.model == "qwen/qwen3.8-27b"
 
 
 def test_groq_reading_stops_after_first_quota_failure(tmp_path, monkeypatch):

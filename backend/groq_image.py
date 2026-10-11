@@ -32,6 +32,18 @@ def _groq_schema_format(contract_format: dict) -> dict:
     }
 
 
+class GroqVisionError(VisionError):
+    def __init__(self, detail: str, raw_response: dict):
+        super().__init__(detail)
+        self.raw_response = raw_response
+
+
+class GroqReadingError(StoreError):
+    def __init__(self, status_code: int, detail: str, raw_response: dict):
+        super().__init__(status_code, detail)
+        self.raw_response = raw_response
+
+
 async def observe_groq_jpeg(client: httpx.AsyncClient, jpeg: bytes, api_key: str, contract: dict) -> dict:
     if not api_key:
         raise VisionError("vision provider unavailable")
@@ -101,24 +113,26 @@ async def observe_groq_jpeg(client: httpx.AsyncClient, jpeg: bytes, api_key: str
         raw = response.json()
     except ValueError:
         raise VisionError("invalid vision provider response") from None
-    if not isinstance(raw, dict) or raw.get("model") != contract["model"]:
+    if not isinstance(raw, dict):
         raise VisionError("invalid vision provider response")
+    if raw.get("model") != contract["model"]:
+        raise GroqVisionError("invalid vision provider response", raw)
     choices = raw.get("choices")
     if not isinstance(choices, list) or len(choices) != 1:
-        raise VisionError("invalid vision provider response")
+        raise GroqVisionError("invalid vision provider response", raw)
     choice = choices[0]
     if not isinstance(choice, dict) or choice.get("finish_reason") != "stop":
-        raise VisionError("vision response not completed")
+        raise GroqVisionError("vision response not completed", raw)
     message = choice.get("message")
     if not isinstance(message, dict) or message.get("refusal"):
-        raise VisionError("vision provider refused observation")
+        raise GroqVisionError("vision provider refused observation", raw)
     text = message.get("content")
     if not isinstance(text, str) or not isinstance(raw.get("id"), str):
-        raise VisionError("invalid vision provider response")
+        raise GroqVisionError("invalid vision provider response", raw)
     try:
         scene = SceneProposal.model_validate_json(text).model_dump()
     except (ValidationError, ValueError):
-        raise VisionError("invalid scene response") from None
+        raise GroqVisionError("invalid scene response", raw) from None
     return {
         "scene": scene,
         "raw_response": raw,
@@ -192,26 +206,28 @@ async def read_groq_crops(
         raw = response.json()
     except ValueError:
         raise StoreError(502, "crop reading provider response malformed") from None
-    if not isinstance(raw, dict) or raw.get("model") != contract["model"]:
+    if not isinstance(raw, dict):
         raise StoreError(502, "crop reading provider response malformed")
+    if raw.get("model") != contract["model"]:
+        raise GroqReadingError(502, "crop reading provider response malformed", raw)
     choices = raw.get("choices")
     if not isinstance(choices, list) or len(choices) != 1:
-        raise StoreError(502, "crop reading provider response malformed")
+        raise GroqReadingError(502, "crop reading provider response malformed", raw)
     choice = choices[0]
     if not isinstance(choice, dict) or choice.get("finish_reason") != "stop":
-        raise StoreError(502, "crop reading provider response not completed")
+        raise GroqReadingError(502, "crop reading provider response not completed", raw)
     message = choice.get("message")
     if not isinstance(message, dict) or message.get("refusal"):
-        raise StoreError(502, "crop reading provider refused")
+        raise GroqReadingError(502, "crop reading provider refused", raw)
     text = message.get("content")
     if not isinstance(text, str) or not isinstance(raw.get("id"), str):
-        raise StoreError(502, "crop reading provider response malformed")
+        raise GroqReadingError(502, "crop reading provider response malformed", raw)
     try:
         parsed = json.loads(text)
     except ValueError:
-        raise StoreError(502, "crop reading provider response malformed") from None
+        raise GroqReadingError(502, "crop reading provider response malformed", raw) from None
     if not isinstance(parsed, dict):
-        raise StoreError(502, "crop reading provider response malformed")
+        raise GroqReadingError(502, "crop reading provider response malformed", raw)
     return {
         "provider": "groq",
         "parsed": parsed,

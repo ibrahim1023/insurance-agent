@@ -106,6 +106,10 @@ async def analyze_sweep_frame(
     except VisionError as exc:
         elapsed_ms = (clock() - started) * 1000.0
         reason = str(exc)
+        raw_response = getattr(exc, "raw_response", None)
+        raw_response = raw_response if isinstance(raw_response, dict) else None
+        actual_model = raw_response.get("model") if raw_response is not None else None
+        actual_model = actual_model if isinstance(actual_model, str) else None
         ref = store.persist_stage(
             sweep_id,
             f"vision_{frame_id}_{uuid.uuid4().hex}.json",
@@ -116,6 +120,10 @@ async def analyze_sweep_frame(
                     "provider": provider,
                     "error": reason,
                     "elapsed_ms": elapsed_ms,
+                    "raw_response": raw_response,
+                    "model": actual_model,
+                    "response_id": raw_response.get("id") if raw_response is not None else None,
+                    "usage": raw_response.get("usage") if raw_response is not None else None,
                 }
             ).encode(),
         )
@@ -128,7 +136,7 @@ async def analyze_sweep_frame(
                     status="failed",
                     provider=provider,
                     persisted_ref=ref,
-                    model=None,
+                    model=actual_model,
                     cost_usd_estimate=None,
                     elapsed_ms=elapsed_ms,
                     error=reason,

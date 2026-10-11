@@ -449,12 +449,21 @@ async def read_spines(
                 readings = validate_readings(parsed, ref_ids_batch)
             except StoreError as exc:
                 elapsed_ms = (clock() - started) * 1000.0
+                if crop_provider is not None and raw is None:
+                    provider_response = getattr(exc, "raw_response", None)
+                    if isinstance(provider_response, dict):
+                        raw = {
+                            "raw_response": provider_response,
+                            "model": provider_response.get("model"),
+                            "response_id": provider_response.get("id"),
+                            "usage": provider_response.get("usage"),
+                        }
                 cost = None
                 stage_model = None
                 usage = None
                 if isinstance(raw, dict):
-                    stage_model = raw.get("model")
-                    usage = raw.get("usage")
+                    stage_model = raw.get("model") if isinstance(raw.get("model"), str) else None
+                    usage = raw.get("usage") if isinstance(raw.get("usage"), dict) else None
                     if crop_provider is None:
                         estimate = usage_cost(raw, usage_cost_adapter(contract))
                         if estimate is not None:
