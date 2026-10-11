@@ -62,9 +62,11 @@ and access/cost. In Groq mode eligible book prices stay null with a
 candidate discovery and retrieved-page quote checks remain as before. Groq is
 hosted, not local: enabling it during an actual sweep sends selected shelf
 frames and crop images to Groq. A bounded public synthetic-image probe made
-three Groq requests: both scene requests were rate-limited, and one crop
-response was incomplete and rejected. No private-image upload, accepted Groq
-reading, physical-count pass or price-accuracy benchmark followed.
+three Groq requests: both scene requests were rate-limited (one provider log
+confirms a 1,000-output-token/minute limit against 1,024 requested), and one
+crop response was incomplete and rejected. The configured scene cap is 6,000,
+so Groq mode is not ready for claims on this account. No private-image upload,
+accepted Groq reading, physical-count pass or price-accuracy benchmark followed.
 
 ## Run (historically verified local launch)
 
