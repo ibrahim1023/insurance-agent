@@ -14,7 +14,7 @@ This is the current status index. [Preflight results](preflight-results.md), dat
 | Physical book count | FAILING / unknown | 59 physical books → 71 provisional tracks, 58 duplicate flags, physical count null; frozen row detectors also fail |
 | Shelf atlas registration | OFFLINE INTERFACE ONLY | Local warp/parallax controls pass; detector and runtime integration absent |
 | Book identification | IMPLEMENTED; accuracy NOT MEASURED | Five accepted tracks in the 59-book trial; complete hand-legible truth absent |
-| Optional Groq scene/crop path | MOCK-VERIFIED; live provider/accuracy NOT MEASURED | Opt-in Qwen scene proposals and ≤3 original crops/request retain stage refs and quota failures. No Groq account call, private upload, fresh-device test or proven reading gain. OpenAI WebRTC voice unchanged |
+| Optional Groq scene/crop path | MOCK-VERIFIED; PUBLIC SYNTHETIC LIVE PROBE FAILED | Opt-in Qwen scene proposals and ≤3 original crops/request retain stage refs. On three public-only calls, two scenes returned HTTP 429 `tokens` and one crop HTTP 200 ended incomplete; no result was accepted. Real-shelf accuracy/device behavior NOT MEASURED. No private upload; OpenAI WebRTC voice unchanged |
 | Catalogue corroboration | NOT IMPLEMENTED | Model/store slot exists; no lookup adapter |
 | Book pricing | INTEGRITY IMPLEMENTED; coverage FAILING | Seeded 3/5 UAE new quotes, 0/5 used; integrated discovery 0/5 eligible URLs; saved sweeps have no accepted prices |
 | Groq pricing discovery | MOCK ADAPTER; SOURCE-PROOF GATED | GPT-OSS browser-search adapter exercises fake responses only; configured Groq sweeps skip real search/quote admission with `source_url_unverified` until a separately approved public-book probe validates machine-readable source URLs and access/cost |
@@ -43,7 +43,7 @@ The read-only [implementation review](2026-10-09-implementation-review.md) remai
 
 Frozen local coverage accounting reports 137/15, 61/8 and 117/8 saved/successfully analyzed frames across the two five-book runs and the 59-book run. The offline six-slot selection simulation retains every saved-frame denominator and explicitly leaves 116/47/103 pending views nonselected; it is not paid replay, new inventory or physical coverage. Legacy quality scores and shelf-row identities remain unknown. Raw artifacts stay private under `.scratch/assessment-run/`.
 
-## Opt-in Groq checkpoint — offline only
+## Opt-in Groq checkpoint — mocked tests and public synthetic probe
 
 `INVENTORY_PROVIDER=groq` selects the server-side scene/crop adapters without any
 OpenAI image/pricing fallback; the OpenAI WebRTC voice path remains unchanged.
@@ -53,13 +53,17 @@ isolated feature worktree, the full Python gate reported **572 passed, 4 skipped
 one existing Starlette/httpx warning; the full Node gate reported **160 passed**.
 On local merged `main`, with the ignored fixtures present, Python reported
 **576 passed**, zero skipped; Node again reported **160 passed**. This difference
-is fixture availability, not extra model evidence. All provider HTTP in those
-checks was `httpx.MockTransport`; no real Groq call,
-private-image upload, phone run or bill was made. The historical trial metrics
-above are not recalculated from those synthetic tests. Groq browser-search
-listing URLs are **BLOCKED** pending separately approved public-book evidence of
-machine-readable sources and tool availability/cost. Qwen preview API behavior,
-book reading/count accuracy and full-sweep latency are **NOT MEASURED**.
+is fixture availability, not extra model evidence. All provider HTTP in those test
+checks was `httpx.MockTransport`. A later approved public synthetic-only probe
+made three real Groq requests: two scene calls returned HTTP 429 `tokens` and a
+crop call returned HTTP 200 but an incomplete response; the adapter accepted
+**zero** observations/readings. The probe made no browser-search request,
+private-image upload or phone run; billing is **NOT MEASURED**. Exact evidence is
+in [preflight results](preflight-results.md). The historical real-shelf metrics
+above are not recalculated from synthetic evidence. Groq browser-search listing
+URLs remain **BLOCKED** pending separately approved public-book evidence of
+machine-readable sources and tool availability/cost. Qwen real-shelf reading/count
+accuracy and full-sweep latency are **NOT MEASURED**.
 
 ## Release decisions
 

@@ -467,3 +467,17 @@ Additional submission/evaluation obligations:
 ### Skill setup status
 
 The ten Matt Pocock skill directories and provenance entries are present under `.devin/skills` and `skills-lock.json`: ask-matt, setup-matt-pocock-skills, writing-for-agents, grill-with-docs, grilling, domain-modeling, codebase-design, tdd, diagnosing-bugs and code-review. `docs/agents` links to `.devin/skill-references`, with tracker/domain references present. Earlier upstream integrity checks remain historical; no reinstall or changes to official skill content are required for this audit. Skill installation is tooling readiness, not assignment feature compliance.
+
+## Public-only Groq API smoke — 2026-10-11
+
+The owner approved at most three hosted requests using generated images and public book text, with no private shelf uploads. An ignored local probe recorded three Groq API attempts; it made no browser-search request and no automatic retry. Sanitized observations are retained at `.scratch/assessment-run/groq-public-probe-results.json`; the generated images are reproducible from the adjacent ignored script. No owner sweep, packet or original frame was changed.
+
+| Input and output limit | Observed HTTP / usage | Accepted result |
+|---|---|---|
+| Synthetic three-spine scene, configured 6,000 output tokens | 429, error type `tokens`; TPM limit 8,000 and remaining 8,000 | None |
+| Same scene, probe-only 1,024 output-token cap | 429, error type `tokens`; TPM limit 8,000 and remaining 8,000 | None |
+| Synthetic printed `Clean Code` / `Robert C. Martin` crop, probe-only 1,024 output-token cap | 200; 1,215 prompt + 1,024 completion = 2,239 total tokens; 2,298.2 ms | None: provider response did not complete and the adapter rejected it |
+
+Groq documents approximately 2,048 input tokens per image; 6,000 reserved output plus that published image figure exceeds the observed 8,000-token-per-minute ceiling even before prompt/schema tokens. That explains why the configured scene cap cannot be assumed viable on this account. **The 1,024-cap scene request also returned 429** with full remaining tokens, so its exact rejection cause remains unresolved; the offline serialized scene request was 40,856 bytes including a 35,311-character JPEG data URL, a 2,762-character schema and a 2,619-character system prompt. Byte and character sizes are **not** measured model tokens. The crop completion used its full temporary 1,024-token cap, but the provider's finish reason was not retained in the sanitized summary; do not present the visible text as an accepted reading. Product contracts still specify 6,000 scene / 4,000 crop output tokens and were not changed by this probe.
+
+Browser search is **BLOCKED**: the published browser-search docs do not establish an account-bounded tool charge or machine-readable source URLs, and the approved three-request budget is exhausted. Billing is **NOT MEASURED**; usage fields are not an invoice. This public synthetic smoke measures only provider request behavior. Groq shelf recognition, crop accuracy on real books, physical counting, local new/used pricing and five-minute postwork remain **NOT MEASURED** or failing as reported in [readiness](readiness.md).

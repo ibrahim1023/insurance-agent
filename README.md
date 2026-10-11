@@ -61,8 +61,10 @@ and access/cost. In Groq mode eligible book prices stay null with a
 `source_url_unverified` review reason; in default mode the existing OpenAI
 candidate discovery and retrieved-page quote checks remain as before. Groq is
 hosted, not local: enabling it during an actual sweep sends selected shelf
-frames and crop images to Groq. No real Groq request, private-image upload or
-price-accuracy benchmark has been run for this integration.
+frames and crop images to Groq. A bounded public synthetic-image probe made
+three Groq requests: both scene requests were rate-limited, and one crop
+response was incomplete and rejected. No private-image upload, accepted Groq
+reading, physical-count pass or price-accuracy benchmark followed.
 
 ## Run (historically verified local launch)
 
