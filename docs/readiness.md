@@ -14,7 +14,7 @@ This is the current status index. [Preflight results](preflight-results.md), dat
 | Physical book count | FAILING / unknown | 59 physical books → 71 provisional tracks, 58 duplicate flags, physical count null; frozen row detectors also fail |
 | Shelf atlas registration | OFFLINE INTERFACE ONLY | Local warp/parallax controls pass; detector and runtime integration absent |
 | Book identification | IMPLEMENTED; accuracy NOT MEASURED | Five accepted tracks in the 59-book trial; complete hand-legible truth absent |
-| Optional Groq scene/crop path | MOCK-VERIFIED; PUBLIC SYNTHETIC LIVE PROBE FAILED | Opt-in Qwen scene proposals and ≤3 original crops/request retain stage refs. Of three public-only calls, two scenes returned HTTP 429 `tokens` (the 1,024-output request had a confirmed 1,000 OTPM limit), and one crop HTTP 200 ended incomplete; no result was accepted. Real-shelf accuracy/device behavior NOT MEASURED. No private upload; OpenAI WebRTC voice unchanged |
+| Optional Groq scene/crop path | MOCK-VERIFIED; PUBLIC SYNTHETIC TRANSPORT MIXED / QUALITY FAILING | Two scenes returned HTTP 429 `tokens` (1,000 OTPM limit versus 1,024 requested); one crop returned HTTP 200 but incomplete and was rejected. A separately approved scene call capped at 900 returned schema-valid HTTP 200 but only one book proposal for three drawn synthetic spines. Product caps unchanged; real-shelf accuracy/device behavior NOT MEASURED. No private upload; OpenAI WebRTC voice unchanged |
 | Catalogue corroboration | NOT IMPLEMENTED | Model/store slot exists; no lookup adapter |
 | Book pricing | INTEGRITY IMPLEMENTED; coverage FAILING | Seeded 3/5 UAE new quotes, 0/5 used; integrated discovery 0/5 eligible URLs; saved sweeps have no accepted prices |
 | Groq pricing discovery | MOCK ADAPTER; SOURCE-PROOF GATED | GPT-OSS browser-search adapter exercises fake responses only; configured Groq sweeps skip real search/quote admission with `source_url_unverified` until a separately approved public-book probe validates machine-readable source URLs and access/cost |
@@ -54,13 +54,14 @@ one existing Starlette/httpx warning; the full Node gate reported **160 passed**
 On local merged `main`, with the ignored fixtures present, Python reported
 **576 passed**, zero skipped; Node again reported **160 passed**. This difference
 is fixture availability, not extra model evidence. All provider HTTP in those test
-checks was `httpx.MockTransport`. A later approved public synthetic-only probe
-made three real Groq requests: two scene calls returned HTTP 429 `tokens` and a
-crop call returned HTTP 200 but an incomplete response; the adapter accepted
-**zero** observations/readings. The probe made no browser-search request,
-private-image upload or phone run; billing is **NOT MEASURED**. Exact evidence is
-in [preflight results](preflight-results.md). The historical real-shelf metrics
-above are not recalculated from synthetic evidence. Groq browser-search listing
+checks was `httpx.MockTransport`. An approved public synthetic-only probe made
+three real Groq requests: two scene calls returned HTTP 429 `tokens` and a crop
+call returned HTTP 200 but incomplete; none was accepted. One separately
+approved scene request with a **probe-only 900-token output cap** completed and
+produced **one book proposal for three drawn spines**. This is not physical-count
+accuracy. No browser search, private-image upload or phone run occurred; billing
+is **NOT MEASURED**. Exact evidence is in [preflight results](preflight-results.md).
+The historical real-shelf metrics above are not recalculated from synthetic evidence. Groq browser-search listing
 URLs remain **BLOCKED** pending separately approved public-book evidence of
 machine-readable sources and tool availability/cost. Qwen real-shelf reading/count
 accuracy and full-sweep latency are **NOT MEASURED**.
