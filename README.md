@@ -194,7 +194,9 @@ price or measurement accuracy.
   spines with one false positive and two misses on its best fixed prompt;
   candidate count error was 7.14%, above the ≤5% bar. Local SAM 2.1 tiny
   automatic masks yielded only four spine-shaped matches out of 14 after a
-  fixed filter. Neither is a validated counter or added to the app.
+  fixed filter. On two later development sections, the unchanged DINO `book.`
+  prompt matched 0/13 versus 8/8 approximate owner-reviewed boxes. Neither is
+  a validated counter or added to the app.
 - **Live UAE discovery is blocked**: the real five-book AE/USD probe found
   0/5 product URLs and 0 accepted prices in 17.2 s — search returned
   homepages/irrelevant results. Automatic discovery needs improvement; this
